@@ -37,6 +37,23 @@ export interface WhatsAppReportDraft {
   updatedAt: string;
 }
 
+export interface WhatsAppVendorAddDraft {
+  step: 'NAME' | 'PRICE' | 'DESC' | 'CONFIRM';
+  productName?: string;
+  price?: string;
+  description?: string;
+  category?: string;
+  updatedAt: string;
+}
+
+export interface WhatsAppVendorEditDraft {
+  step: 'SELECT' | 'ACTION' | 'VALUE';
+  selectedProductId?: string;
+  selectedProductName?: string;
+  action?: 'PRICE' | 'NAME' | 'DELETE';
+  updatedAt: string;
+}
+
 export interface WhatsAppSearchState {
   lastQuery?: string;
   cleanProduct?: string;
@@ -53,19 +70,27 @@ export interface WhatsAppUserSessionState {
     | 'AWAITING_SAVE_CONTACT'
     | 'QUALIFYING_VOLUME'
     | 'QUALIFYING_FULFILLMENT'
+    | 'QUALIFYING_LOCATION'
     | 'REG_ONBOARDING'
     | 'CLAIM_PROCESS'
-    | 'REPORT_PROCESS';
+    | 'REPORT_PROCESS'
+    | 'VENDOR_PORTAL'
+    | 'VENDOR_ADD_PRODUCT'
+    | 'VENDOR_EDIT_PRODUCTS'
+    | 'VENDOR_DELETE_CONFIRM';
   activeVendorId?: string;
   activeVendorName?: string;
   activeVendorPhone?: string;
   activeItem?: string;
   orderVolume?: 'Retail' | 'Wholesale';
   fulfillment?: 'Shop Visit' | 'Local City Delivery' | 'Interstate Waybill';
+  buyerLocation?: string;
   searchState?: WhatsAppSearchState;
   regDraft?: WhatsAppVendorRegDraft;
   claimDraft?: WhatsAppClaimDraft;
   reportDraft?: WhatsAppReportDraft;
+  vendorAddDraft?: WhatsAppVendorAddDraft;
+  vendorEditDraft?: WhatsAppVendorEditDraft;
   hasReceivedContactCard?: boolean;
   pendingIntent?: {
     action: 'REGISTER_VENDOR' | 'CONNECT_VENDOR' | 'SEARCH' | 'GREETING';

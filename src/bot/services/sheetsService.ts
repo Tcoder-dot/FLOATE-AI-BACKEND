@@ -229,7 +229,8 @@ export function formatWhatsAppUrl(
   productName?: string,
   buyerFirstName?: string,
   listingType?: string,
-  itemTypeHint?: 'product' | 'service'
+  itemTypeHint?: 'product' | 'service',
+  businessName?: string
 ): string {
   let clean = rawPhone.replace(/[^\d+]/g, '');
   if (clean.startsWith('0')) {
@@ -241,7 +242,9 @@ export function formatWhatsAppUrl(
     clean = '234' + clean;
   }
 
-  const msg = `HI, I was directed to you from FLOATE AI.`;
+  const msg = businessName && businessName.trim()
+    ? `HI ${businessName.trim().toUpperCase()}, I found you on FLOATE.`
+    : `HI, I found you on FLOATE.`;
   const url = `https://wa.me/${clean}?text=${encodeURIComponent(msg)}`;
 
   // Ensure any parentheses inside the URL parameter string are encoded to prevent breaking Markdown links
@@ -292,7 +295,8 @@ export function formatListingDisplay(
       itemToBuy,
       buyerFirstName,
       listing.listingType,
-      itemTypeHint
+      itemTypeHint,
+      listing.businessName
     );
     waDisplay = `[Message on WhatsApp](${waUrl})`;
   }
@@ -854,6 +858,18 @@ class SheetsDatabaseService {
     const deletedCount = initialCount - this.businessListings.length;
     this.logInteraction(userId, 'System', 'DELETE_BUSINESS', `Removed business and deleted ${deletedCount} listings`);
     return deletedCount;
+  }
+
+  /**
+   * Finds a business listing by registered WhatsApp phone number
+   */
+  public getListingByPhone(phone: string): BusinessListing | undefined {
+    if (!phone) return undefined;
+    const cleanTarget = normalizePhone(phone);
+    return this.businessListings.find((b) => {
+      const bPhone = normalizePhone(b.whatsapp);
+      return bPhone === cleanTarget || (cleanTarget && bPhone.endsWith(cleanTarget.slice(-8)));
+    });
   }
 
   /**

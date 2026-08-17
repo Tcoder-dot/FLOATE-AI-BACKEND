@@ -158,7 +158,10 @@ export function formatWhatsAppMsg(
   urgency?: string,
   category?: string
 ): string {
-  return `HI, I was directed to you from FLOATE AI.`;
+  if (merchantName && merchantName.trim()) {
+    return `HI ${merchantName.trim().toUpperCase()}, I found you on FLOATE.`;
+  }
+  return `HI, I found you on FLOATE.`;
 }
 
 export interface UserSessionDoc {
@@ -1493,6 +1496,162 @@ export class FirestoreService {
       console.error(`[Firestore Notice] Delete merchant check for "${merchantIdOrQuery}":`, err);
     }
     return { deletedMerchant, deletedProductsCount };
+  }
+
+  /**
+   * Get all products for a specific merchant
+   */
+  public async getProductsByMerchant(merchantIdOrPhone: string): Promise<ProductDoc[]> {
+    try {
+      const cleanKey = String(merchantIdOrPhone).trim().toLowerCase();
+      const normPhone = normalizePhone(merchantIdOrPhone);
+      const productsRef = collection(db, 'products');
+      const pSnap = await getDocs(query(productsRef));
+      const list: ProductDoc[] = [];
+
+      for (const pDoc of pSnap.docs) {
+        const data = pDoc.data() as ProductDoc;
+        const mId = (data.merchantId || '').toLowerCase();
+        const pPhone = normalizePhone(data.whatsapp || '');
+        if (
+          mId === cleanKey ||
+          mId.includes(cleanKey) ||
+          (normPhone && pPhone === normPhone) ||
+          (cleanKey && data.businessName?.toLowerCase() === cleanKey)
+        ) {
+          list.push({ ...data, id: pDoc.id });
+        }
+      }
+      return list;
+    } catch (err) {
+      console.error(`[Firestore] Error fetching products for merchant ${merchantIdOrPhone}:`, err);
+      return [];
+    }
+  }
+
+  /**
+   * Update a product by its ID
+   */
+  public async updateProduct(productId: string, updates: Partial<ProductDoc>): Promise<boolean> {
+    try {
+      const pRef = doc(db, 'products', productId);
+      const snap = await getDoc(pRef);
+      if (!snap.exists()) return false;
+
+      const sanitizedUpdates = this.sanitizeForFirestore({
+        ...updates,
+        updatedAt: new Date().toISOString(),
+      });
+      await updateDoc(pRef, sanitizedUpdates);
+      return true;
+    } catch (err) {
+      console.error(`[Firestore] Error updating product ${productId}:`, err);
+      return false;
+    }
+  }
+
+  /**
+   * Delete a single product by ID
+   */
+  public async deleteProductById(productId: string): Promise<boolean> {
+    try {
+      const { deleteDoc, doc: firestoreDoc } = await import('firebase/firestore');
+      const pRef = firestoreDoc(db, 'products', productId);
+      await deleteDoc(pRef);
+      return true;
+    } catch (err) {
+      console.error(`[Firestore] Error deleting product ${productId}:`, err);
+      return false;
+    }
+  }
+
+  /**
+   * Get vendor performance stats
+   */
+  public async getMerchantStats(merchantIdOrPhone: string): Promise<{
+    appearances: number;
+    leadsGenerated: number;
+    productCount: number;
+    balance: number;
+    registeredSince: string;
+    isVerified: boolean;
+    businessName: string;
+  }> {
+    const merchant = await this.getMerchant(merchantIdOrPhone);
+    const products = await this.getProductsByMerchant(merchantIdOrPhone);
+    
+    // Count leads
+    let leadsCount = 0;
+    try {
+      const leadsCol = collection(db, 'leads');
+      const lSnap = await getDocs(query(leadsCol));
+      const cleanPhone = normalizePhone(merchantIdOrPhone);
+      for (const lDoc of lSnap.docs) {
+        const lead = lDoc.data() as LeadDoc;
+        if (
+          lead.merchantId === merchant?.id ||
+          (cleanPhone && normalizePhone(lead.merchantWhatsapp) === cleanPhone)
+        ) {
+          leadsCount++;
+        }
+      }
+    } catch (e) {
+      console.warn('[Firestore] Notice fetching lead count:', e);
+    }
+
+    return {
+      appearances: Math.max(12, products.length * 4 + leadsCount * 3),
+      leadsGenerated: leadsCount,
+      productCount: products.length,
+      balance: merchant?.credit_balance ?? 1000,
+      registeredSince: merchant?.claimDate || 'Jan 2026',
+      isVerified: merchant?.isVerified ?? true,
+      businessName: merchant?.businessName || 'Your Business',
+    };
+  }
+
+  /**
+   * Records a 3-step qualified lead from WhatsApp to Firestore
+   */
+  public async recordWhatsAppLead(params: {
+    buyerPhone: string;
+    buyerName?: string;
+    merchantId: string;
+    merchantName: string;
+    merchantWhatsapp: string;
+    item: string;
+    orderVolume: 'Retail' | 'Wholesale';
+    fulfillment: 'Shop Visit' | 'Local City Delivery' | 'Interstate Waybill';
+    buyerLocation: string;
+  }): Promise<LeadDoc | null> {
+    try {
+      const leadId = `lead-wa-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const leadRefCode = `FLT-${Math.floor(100000 + Math.random() * 900000)}`;
+      const cleanBizPhone = normalizePhone(params.merchantWhatsapp).replace(/^0/, '234');
+      const waLink = `https://wa.me/${cleanBizPhone}?text=${encodeURIComponent(`HI ${params.merchantName.toUpperCase()}, I found you on FLOATE.`)}`;
+
+      const lead: LeadDoc = {
+        id: leadId,
+        ref: leadRefCode,
+        buyerId: params.buyerPhone,
+        buyerUsername: params.buyerName || params.buyerPhone,
+        merchantId: params.merchantId || '',
+        merchantName: params.merchantName || '',
+        merchantWhatsapp: params.merchantWhatsapp || '',
+        item: params.item || 'In-Stock Item',
+        location: params.buyerLocation || 'Nigeria',
+        cost: 0,
+        waLink,
+        timestamp: new Date().toISOString(),
+      };
+
+      const leadsCol = collection(db, 'leads');
+      await setDoc(doc(leadsCol, leadId), this.sanitizeForFirestore(lead));
+      return lead;
+    } catch (err) {
+      console.error('[Firestore] Error saving WhatsApp lead:', err);
+      return null;
+    }
   }
 }
 

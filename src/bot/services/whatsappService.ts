@@ -1,6 +1,6 @@
 import express from 'express';
 import { config } from '../config.js';
-import { sheetsDb, BusinessListing, normalizePhone, escapeMarkdownText } from './sheetsService.js';
+import { sheetsDb, BusinessListing, normalizePhone, escapeMarkdownText, isSpotlightBusiness } from './sheetsService.js';
 import { firestoreDb } from './firestoreService.js';
 import {
   parseShoppingQuery,
@@ -520,60 +520,7 @@ export async function processMasterWhatsAppEngine(params: {
   const rawLower = text.toLowerCase().trim();
   const cleanLower = rawLower.replace(/[^a-z0-9 _]+/g, '').replace(/\s+/g, ' ');
 
-  // Helper to handle contact card prompt before completing intent
-  const promptContactCardAndHoldIntent = async (
-    actionLabel: string,
-    pendingIntent: { action: 'REGISTER_VENDOR' | 'CONNECT_VENDOR' | 'SEARCH' | 'GREETING'; payload?: any }
-  ) => {
-    await sendWhatsAppContactCard(senderPhone);
-    updateWhatsAppSession(senderPhone, {
-      state: 'AWAITING_SAVE_CONTACT',
-      hasReceivedContactCard: true,
-      pendingIntent,
-    });
-    const firstName = senderName && senderName !== 'Customer' ? senderName.split(' ')[0] : 'there';
-    await sendWhatsAppMessage(
-      senderPhone,
-      `👋 *Welcome to Floate, ${firstName}!*\n\n` +
-      `💡 *Quick tip:* Tap the contact card above and save our number as *"Floate"* so you can easily access verified merchants, get price checks, and view daily market deals anytime!\n\n` +
-      `Tap below to continue to *${actionLabel}*:`,
-      {
-        quickReplies: [
-          { id: 'btn_saved_continue', title: '✅ Done, Continue' },
-        ],
-      }
-    );
-  };
-
-  // 2. Handle AWAITING_SAVE_CONTACT continuation
-  if (
-    session.state === 'AWAITING_SAVE_CONTACT' ||
-    text === 'btn_saved_continue' ||
-    /^(done|saved|continue|ok|okay|yes|next|i have saved|saved contact|btn_continue_action)$/i.test(cleanLower)
-  ) {
-    const pending = session.pendingIntent;
-    updateWhatsAppSession(senderPhone, {
-      state: 'IDLE',
-      pendingIntent: undefined,
-      hasReceivedContactCard: true,
-    });
-
-    if (pending?.action === 'REGISTER_VENDOR') {
-      await handleVendorHubRouting(senderPhone, senderName);
-      return;
-    } else if (pending?.action === 'CONNECT_VENDOR' && pending.payload?.vendorId) {
-      await start2StepLeadQualification(senderPhone, senderName, pending.payload.vendorId);
-      return;
-    } else if (pending?.action === 'SEARCH' && pending.payload?.query) {
-      await execute5CardSearch(senderPhone, senderName, { queryText: pending.payload.query });
-      return;
-    } else {
-      await sendWelcomeGreeting(senderPhone, senderName);
-      return;
-    }
-  }
-
-  // 3. Global Reset / Cancel / Home Interceptor
+  // 1. Global Reset / Cancel / Home Interceptor
   if (/^(reset|cancel|stop|exit|start over|restart|home|menu|main menu|\/start|\/cancel|btn_home)$/i.test(cleanLower)) {
     resetWhatsAppSession(senderPhone);
     await firestoreDb.resetUserSession(senderPhone);
@@ -581,28 +528,75 @@ export async function processMasterWhatsAppEngine(params: {
     return;
   }
 
-  // 4. Welcome / Greeting / HELLO FLOATE Intent Trigger
+  // 2. Welcome / Greeting / HELLO FLOATE Intent Trigger
   if (/^(hello floate|hello_floate|hellofloate|hi|hello|hey|good morning|good afternoon|good evening|start|btn_greeting)$/i.test(cleanLower)) {
-    if (!session.hasReceivedContactCard) {
-      await promptContactCardAndHoldIntent('Floate Main Menu', { action: 'GREETING' });
-      return;
-    }
     resetWhatsAppSession(senderPhone);
     await sendWelcomeGreeting(senderPhone, senderName);
     return;
   }
 
-  // 5. Deep-Linked Register Business / Vendor Hub Trigger
+  // 3. Deep-Linked Register Business / Vendor Hub / Merchant Portal Trigger
   if (
     text === 'START_REGISTER_VENDOR' ||
     text === 'btn_for_businesses' ||
-    /^(register_business|start_register_vendor|register business|vendor|business|vendor hub|merchant|add my shop|list my shop)$/i.test(cleanLower)
+    text === 'btn_vendor_portal' ||
+    text === 'btn_vendor_dashboard' ||
+    /^(register_business|start_register_vendor|register business|vendor|business|vendor hub|merchant|add my shop|list my shop|my business|vendor portal|manage|merchant portal|dashboard|my store|store)$/i.test(cleanLower)
   ) {
-    if (!session.hasReceivedContactCard) {
-      await promptContactCardAndHoldIntent('Register Your Business', { action: 'REGISTER_VENDOR' });
+    await handleVendorHubRouting(senderPhone, senderName);
+    return;
+  }
+
+  // 4. Vendor Self-Service Direct Action Triggers
+  if (text === 'btn_vendor_stats' || /^(stats|view stats|performance|my stats)$/i.test(cleanLower)) {
+    await handleVendorStats(senderPhone, senderName);
+    return;
+  }
+
+  if (text === 'btn_vendor_add_product' || /^(add product|add item|new product|list product)$/i.test(cleanLower)) {
+    await startVendorAddProduct(senderPhone, senderName);
+    return;
+  }
+
+  if (text === 'btn_vendor_edit_products' || /^(edit listings|edit products|my inventory|inventory|manage products|edit prices)$/i.test(cleanLower)) {
+    await startVendorEditProducts(senderPhone, senderName);
+    return;
+  }
+
+  if (text === 'btn_vendor_delete_account' || /^(delete account|delete store|deactivate store|deactivate account)$/i.test(cleanLower)) {
+    await startVendorDeleteAccount(senderPhone, senderName);
+    return;
+  }
+
+  if (text === 'btn_confirm_delete_account' || session.state === 'VENDOR_DELETE_CONFIRM') {
+    await handleVendorDeleteAccountConfirm(senderPhone, senderName, text);
+    return;
+  }
+
+  // 5. Active Vendor Portal Sessions
+  if (session.state === 'VENDOR_PORTAL') {
+    if (cleanLower === '1' || cleanLower === 'stats' || cleanLower === 'view stats') {
+      await handleVendorStats(senderPhone, senderName);
+      return;
+    } else if (cleanLower === '2' || cleanLower === 'add' || cleanLower === 'add product') {
+      await startVendorAddProduct(senderPhone, senderName);
+      return;
+    } else if (cleanLower === '3' || cleanLower === 'edit' || cleanLower === 'edit listings') {
+      await startVendorEditProducts(senderPhone, senderName);
+      return;
+    } else if (cleanLower === '4' || cleanLower === 'delete' || cleanLower === 'delete store') {
+      await startVendorDeleteAccount(senderPhone, senderName);
       return;
     }
-    await handleVendorHubRouting(senderPhone, senderName);
+  }
+
+  if (session.state === 'VENDOR_ADD_PRODUCT') {
+    await handleVendorAddProductStep(senderPhone, senderName, text, session);
+    return;
+  }
+
+  if (session.state === 'VENDOR_EDIT_PRODUCTS') {
+    await handleVendorEditProductsStep(senderPhone, senderName, text, session);
     return;
   }
 
@@ -615,16 +609,6 @@ export async function processMasterWhatsAppEngine(params: {
     /^connect\s+vendor\s+[a-z0-9_-]+/i.test(text)
   ) {
     const bizId = text.replace(/^(connect_biz_|connect_lead_|connect_vendor_|CONNECT_VENDOR_|connect\s+vendor\s+)/i, '').trim();
-    const listing = sheetsDb.getListingById(bizId);
-    const bizName = listing?.businessName || 'Verified Merchant';
-
-    if (!session.hasReceivedContactCard) {
-      await promptContactCardAndHoldIntent(`Connect with ${bizName}`, {
-        action: 'CONNECT_VENDOR',
-        payload: { vendorId: bizId },
-      });
-      return;
-    }
     await start2StepLeadQualification(senderPhone, senderName, bizId);
     return;
   }
@@ -632,30 +616,28 @@ export async function processMasterWhatsAppEngine(params: {
   // 7. Deep-Linked Search Query (e.g. SEARCH_shoes_in_onitsha)
   if (text.startsWith('SEARCH_') || text.startsWith('search_')) {
     const sq = text.replace(/^(SEARCH_|search_)/, '').replace(/_/g, ' ').trim();
-    if (!session.hasReceivedContactCard) {
-      await promptContactCardAndHoldIntent(`Search "${sq}"`, {
-        action: 'SEARCH',
-        payload: { query: sq },
-      });
-      return;
-    }
     await execute5CardSearch(senderPhone, senderName, { queryText: sq });
     return;
   }
 
-  // 8. Number selection (1-5), ordinal, or business name selection from active search results
+  // 8. Number selection (1-10), ordinal, or business name selection from active search results
   if (session.searchState?.allMatchingListings && session.searchState.allMatchingListings.length > 0) {
     const listings = session.searchState.allMatchingListings;
-    const pageOffset = (session.searchState.pageIndex || 0) * 5;
-    const currentBatch = listings.slice(pageOffset, pageOffset + 5);
+    const pageOffset = (session.searchState.pageIndex || 0) * 10;
+    const currentBatch = listings.slice(pageOffset, pageOffset + 10);
 
-    // Check numerical selection: "1", "2", "option 1", "first one", "second vendor", etc.
+    // Check numerical selection: "1", "2" ... "10", "option 1", "first one", "second vendor", etc.
     const ordinalMap: Record<string, number> = {
       'first': 1, '1st': 1, 'one': 1, '1': 1,
       'second': 2, '2nd': 2, 'two': 2, '2': 2,
       'third': 3, '3rd': 3, 'three': 3, '3': 3,
       'fourth': 4, '4th': 4, 'four': 4, '4': 4,
       'fifth': 5, '5th': 5, 'five': 5, '5': 5,
+      'sixth': 6, '6th': 6, 'six': 6, '6': 6,
+      'seventh': 7, '7th': 7, 'seven': 7, '7': 7,
+      'eighth': 8, '8th': 8, 'eight': 8, '8': 8,
+      'ninth': 9, '9th': 9, 'nine': 9, '9': 9,
+      'tenth': 10, '10th': 10, 'ten': 10, '10': 10,
     };
 
     let selectedIdx = -1;
@@ -691,7 +673,7 @@ export async function processMasterWhatsAppEngine(params: {
     if (selectedIdx >= 0 && selectedIdx < listings.length) {
       const selectedListing = listings[selectedIdx];
       if (selectedListing) {
-        await start2StepLeadQualification(senderPhone, senderName, selectedListing.id);
+        await start3StepLeadQualification(senderPhone, senderName, selectedListing.id);
         return;
       }
     }
@@ -816,34 +798,46 @@ export async function processMasterWhatsAppEngine(params: {
       abuja_wuse: 'Wuse Market, Abuja',
     };
     const targetLoc = marketNameMap[marketKey] || 'Nigeria';
-    await execute5CardSearch(senderPhone, senderName, { queryText: 'Popular wholesale & retail items', location: targetLoc });
+    await execute10CardSearch(senderPhone, senderName, { queryText: 'Popular wholesale & retail items', location: targetLoc });
     return;
   }
 
   // 9. Interactive Category Chip Selection (e.g. chip_shoes_women, chip_shoes_men, chip_phones_iphone)
   if (text.startsWith('chip_')) {
     const chipQuery = text.replace('chip_', '').replace(/_/g, ' ');
-    await execute5CardSearch(senderPhone, senderName, { queryText: chipQuery });
+    await execute10CardSearch(senderPhone, senderName, { queryText: chipQuery });
     return;
   }
 
-  // 10. Show Next 5 Vendors Pagination
-  if (text === 'btn_next_5_vendors' || cleanLower === 'next 5' || cleanLower === 'show next') {
-    await handleShowNext5Vendors(senderPhone, senderName, session);
+  // 10. Show Next 10 Vendors Pagination
+  if (
+    text === 'btn_next_10_vendors' ||
+    text === 'btn_next_5_vendors' ||
+    cleanLower === 'next 10' ||
+    cleanLower === 'next' ||
+    cleanLower === 'show next'
+  ) {
+    await handleShowNext10Vendors(senderPhone, senderName, session);
     return;
   }
 
-  // 11. Vendor Selection & 2-Step Lead Qualification
+  // 11. Vendor Selection & 3-Step Lead Qualification
   if (text.startsWith('connect_biz_') || text.startsWith('connect_')) {
     const bizId = text.replace(/^(connect_biz_|connect_)/, '').trim();
-    await start2StepLeadQualification(senderPhone, senderName, bizId);
+    await start3StepLeadQualification(senderPhone, senderName, bizId);
     return;
   }
 
-  // Step 1: Order Volume Answered
+  // Step 1: Order Volume Answered -> Go to Step 2 (Fulfillment)
   if (session.state === 'QUALIFYING_VOLUME') {
-    if (text.startsWith('vol_') || /^(retail|wholesale|personal|bulk|resell|sample)$/i.test(cleanLower) || /^(retail use|personal use|wholesale bulk|bulk order)$/i.test(cleanLower)) {
-      const volChoice: 'Retail' | 'Wholesale' = /wholesale|bulk|resell/i.test(cleanLower) || text === 'vol_wholesale' ? 'Wholesale' : 'Retail';
+    if (
+      text.startsWith('vol_') ||
+      /^(retail|wholesale|personal|bulk|resell|sample)$/i.test(cleanLower) ||
+      /^(retail order|personal retail|wholesale order|bulk order)$/i.test(cleanLower)
+    ) {
+      const volChoice: 'Retail' | 'Wholesale' =
+        /wholesale|bulk|resell/i.test(cleanLower) || text === 'vol_wholesale' ? 'Wholesale' : 'Retail';
+
       updateWhatsAppSession(senderPhone, {
         state: 'QUALIFYING_FULFILLMENT',
         orderVolume: volChoice,
@@ -851,7 +845,7 @@ export async function processMasterWhatsAppEngine(params: {
 
       await sendWhatsAppMessage(
         senderPhone,
-        `📍 *Step 2 of 2: Fulfillment & Delivery Preference*\n\n` +
+        `📍 *Step 2 of 3: Fulfillment & Delivery Preference*\n\n` +
         `How would you like to receive your item from *${session.activeVendorName}*?\n\n` +
         `1️⃣ *Physical Shop Visit* (Walk in & inspect)\n` +
         `2️⃣ *Local City Delivery* (Dispatch to doorstep)\n` +
@@ -868,14 +862,18 @@ export async function processMasterWhatsAppEngine(params: {
     } else if (!text.startsWith('vol_') && cleanLower.length > 2) {
       // If user typed a completely different product or question instead of answering volume, cancel qualification and search
       resetWhatsAppSession(senderPhone);
-      await execute5CardSearch(senderPhone, senderName, { queryText: text });
+      await execute10CardSearch(senderPhone, senderName, { queryText: text });
       return;
     }
   }
 
-  // Step 2: Fulfillment Answered -> Complete Handoff
+  // Step 2: Fulfillment Answered -> Go to Step 3 (Buyer Location)
   if (session.state === 'QUALIFYING_FULFILLMENT') {
-    if (text.startsWith('ful_') || /^(visit|delivery|waybill|interstate|shop|dispatch|pickup|doorstep|way bill)$/i.test(cleanLower) || /^(shop visit|city delivery|interstate waybill)$/i.test(cleanLower)) {
+    if (
+      text.startsWith('ful_') ||
+      /^(visit|delivery|waybill|interstate|shop|dispatch|pickup|doorstep|way bill)$/i.test(cleanLower) ||
+      /^(shop visit|city delivery|interstate waybill)$/i.test(cleanLower)
+    ) {
       let fulChoice: 'Shop Visit' | 'Local City Delivery' | 'Interstate Waybill' = 'Local City Delivery';
       if (text === 'ful_visit' || /visit|shop|pickup|in person/i.test(cleanLower)) {
         fulChoice = 'Shop Visit';
@@ -883,18 +881,52 @@ export async function processMasterWhatsAppEngine(params: {
         fulChoice = 'Interstate Waybill';
       }
 
-      await finish2StepQualificationHandoff(senderPhone, senderName, fulChoice, session);
+      updateWhatsAppSession(senderPhone, {
+        state: 'QUALIFYING_LOCATION',
+        fulfillment: fulChoice,
+      });
+
+      await sendWhatsAppMessage(
+        senderPhone,
+        `📍 *Step 3 of 3: Buyer Location*\n\n` +
+        `Which city or state are you shopping from?\n\n` +
+        `_Tap a common city below, or simply reply with your city name (e.g. \`Enugu\`, \`Ibadan\`, \`Asaba\`, \`Kano\`):_`,
+        {
+          quickReplies: [
+            { id: 'loc_lagos', title: '📍 Lagos' },
+            { id: 'loc_abuja', title: '📍 Abuja' },
+            { id: 'loc_ph', title: '📍 Port Harcourt' },
+          ],
+        }
+      );
       return;
     } else if (!text.startsWith('ful_') && cleanLower.length > 2) {
       // If user typed a completely new search term instead of answering delivery, cancel and execute search
       resetWhatsAppSession(senderPhone);
-      await execute5CardSearch(senderPhone, senderName, { queryText: text });
+      await execute10CardSearch(senderPhone, senderName, { queryText: text });
       return;
     }
   }
 
+  // Step 3: Buyer Location Answered -> Save Lead to DB & Complete Handoff
+  if (session.state === 'QUALIFYING_LOCATION') {
+    let buyerLoc = text.trim();
+    if (text === 'loc_lagos' || cleanLower.includes('lagos')) {
+      buyerLoc = 'Lagos';
+    } else if (text === 'loc_abuja' || cleanLower.includes('abuja')) {
+      buyerLoc = 'Abuja';
+    } else if (text === 'loc_ph' || cleanLower.includes('port harcourt') || cleanLower.includes('ph')) {
+      buyerLoc = 'Port Harcourt';
+    } else if (text.startsWith('loc_')) {
+      buyerLoc = text.replace('loc_', '').replace(/_/g, ' ');
+    }
+
+    await finish3StepQualificationHandoff(senderPhone, senderName, buyerLoc, session);
+    return;
+  }
+
   // 12. Default: Natural Language Search Query (English, Pidgin, Local Market Slang)
-  await execute5CardSearch(senderPhone, senderName, { queryText: text });
+  await execute10CardSearch(senderPhone, senderName, { queryText: text });
 }
 
 /**
@@ -907,6 +939,7 @@ async function sendWelcomeGreeting(toPhone: string, senderName: string) {
   const msg =
     `${greeting}\n\n` +
     `I'm here to help you find verified vendors, products, and services across Nigeria.\n\n` +
+    `💡 *Tip:* Save this number as *FLOATE* so you can easily search items and message verified sellers anytime!\n\n` +
     `*What are you shopping for today?*\n` +
     `Choose an option below:`;
 
@@ -920,9 +953,9 @@ async function sendWelcomeGreeting(toPhone: string, senderName: string) {
 }
 
 /**
- * 2. 4-LAYER DISCOVERY ENGINE (Scaling to 20,000+ Vendors)
+ * 2. 10-BUSINESS SEARCH & DISCOVERY ENGINE (Spotlight Priority with Organic Fallback)
  */
-async function execute5CardSearch(toPhone: string, senderName: string, params: { queryText: string; location?: string }) {
+async function execute10CardSearch(toPhone: string, senderName: string, params: { queryText: string; location?: string }) {
   const { queryText, location } = params;
 
   // 1. AI Parsing with Gemini
@@ -994,21 +1027,31 @@ async function execute5CardSearch(toPhone: string, senderName: string, params: {
     searchResults = { exactMatches: [], categoryMatches: [], allMatches: [], source: 'local' as const };
   }
 
-  const localMatches: BusinessListing[] = searchResults.exactMatches.length > 0
-    ? [...searchResults.exactMatches, ...searchResults.categoryMatches]
-    : searchResults.categoryMatches;
+  const rawMatches = [
+    ...searchResults.exactMatches,
+    ...searchResults.categoryMatches,
+    ...(searchResults.outOfAreaRecommendations || []),
+  ];
 
-  const recommendations: BusinessListing[] = searchResults.outOfAreaRecommendations || [];
+  // Deduplicate matches by ID
+  const seenIds = new Set<string>();
+  const uniqueMatches: BusinessListing[] = [];
+  for (const m of rawMatches) {
+    if (m && m.id && !seenIds.has(m.id)) {
+      seenIds.add(m.id);
+      uniqueMatches.push(m);
+    }
+  }
 
-  // SCENARIO A: No local matches AND no out-of-area recommendations
-  if (localMatches.length === 0 && recommendations.length === 0) {
+  // SCENARIO: No matching sellers found
+  if (uniqueMatches.length === 0) {
     await sendWhatsAppMessage(
       toPhone,
       `🔍 *Search Results for:* "${cleanProduct}"\n\n` +
       `No verified sellers are currently active for this item in our immediate directory.\n\n` +
       `💡 *Suggestions:*\n` +
-      `• Try searching a broader term (e.g. \`Leather Slippers\` instead of a specific code).\n` +
-      `• Check top commercial market hubs in Lagos, Onitsha, or Aba below:`,
+      `• Try searching a broader term (e.g. \`Leather Slippers\` or \`Solar Battery\`).\n` +
+      `• Browse top commercial market hubs below:`,
       {
         quickReplies: [
           { id: 'btn_browse_markets', title: '📍 Browse Markets' },
@@ -1020,12 +1063,24 @@ async function execute5CardSearch(toPhone: string, senderName: string, params: {
     return;
   }
 
-  // Determine top items for display
-  const primaryDisplay = localMatches.length > 0 ? localMatches.slice(0, 5) : [];
-  const recDisplay = recommendations.slice(0, 3);
+  // 3. Spotlight Prioritization with Organic Fallback:
+  // Separate into Spotlight listings and Organic listings
+  const spotlightMatches: BusinessListing[] = [];
+  const organicMatches: BusinessListing[] = [];
 
-  // All matches for pagination in order: local first, then recommendations
-  const allMatches = [...localMatches, ...recommendations];
+  for (const item of uniqueMatches) {
+    if (isSpotlightBusiness(item.businessName) || item.isHighlyRecommended) {
+      spotlightMatches.push(item);
+    } else {
+      organicMatches.push(item);
+    }
+  }
+
+  // Prioritize Spotlight listings first, then Organic matches as fallback
+  const prioritizedListings = [...spotlightMatches, ...organicMatches];
+
+  // Take top 10 for the primary view
+  const primaryDisplay = prioritizedListings.slice(0, 10);
 
   // Save in user session state for pagination / selection
   updateWhatsAppSession(toPhone, {
@@ -1035,85 +1090,70 @@ async function execute5CardSearch(toPhone: string, senderName: string, params: {
       cleanProduct,
       location: targetLoc,
       category: parsed.category || '',
-      allMatchingListings: allMatches,
+      allMatchingListings: prioritizedListings,
       pageIndex: 0,
       updatedAt: new Date().toISOString(),
     },
   });
 
   const locNotice = targetLoc ? ` in *${targetLoc}*` : '';
-  let previewMsg = '';
+  let previewMsg = `🔍 *Verified sellers for "${cleanProduct}"${locNotice}:*\n\n`;
 
-  if (primaryDisplay.length > 0) {
-    previewMsg += `🔍 *Verified vendors${locNotice} matching "${cleanProduct}":*\n\n`;
-    for (let i = 0; i < primaryDisplay.length; i++) {
-      const v = primaryDisplay[i];
-      const priceDisplay = v.price || 'Market Rate';
-      const locDisplay = `${v.city || v.state || 'Market Hub'}`;
-      previewMsg +=
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `*${i + 1}️⃣ ${v.businessName}*\n` +
-        `📍 *Location:* ${locDisplay}\n` +
-        `🏷️ *In Stock:* ${v.product}\n` +
-        `💰 *Price:* ${priceDisplay}\n` +
-        `🟢 *Status:* Verified Vendor\n`;
-    }
-    previewMsg += `━━━━━━━━━━━━━━━━━━━━\n`;
-  } else if (targetLoc) {
-    previewMsg += `📍 *No direct vendors found in ${targetLoc} right now for "${cleanProduct}".*\n\n`;
+  for (let i = 0; i < primaryDisplay.length; i++) {
+    const v = primaryDisplay[i];
+    const priceDisplay = v.price || 'Market Rate';
+    const spotlightTag = (isSpotlightBusiness(v.businessName) || v.isHighlyRecommended) ? ' ⭐' : '';
+    previewMsg += `${i + 1}. *${v.businessName}*${spotlightTag} — ${v.product} (${priceDisplay})\n`;
   }
 
-  // Append out-of-area recommendations under "Check this out"
-  if (recDisplay.length > 0 && (targetLoc || primaryDisplay.length < 5)) {
-    previewMsg += `\n💡 *Check this out (Verified vendors in other locations):*\n`;
-    for (let j = 0; j < recDisplay.length; j++) {
-      const rec = recDisplay[j];
-      const recLoc = `${rec.city || rec.state || 'Nigeria'}`;
-      previewMsg +=
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `*✨ ${rec.businessName}*\n` +
-        `📍 *Location:* ${recLoc} (Interstate delivery / Waybill)\n` +
-        `🏷️ *Item:* ${rec.product}\n` +
-        `💰 *Price:* ${rec.price || 'Market Rate'}\n`;
-    }
-    previewMsg += `━━━━━━━━━━━━━━━━━━━━\n`;
-  }
+  previewMsg +=
+    `────────────────────\n` +
+    `💡 *How to select:*\n` +
+    `• Tap *"Select Vendor"* below, OR\n` +
+    `• Reply with the number (e.g. \`1\`, \`2\`, \`3\`) or vendor name`;
 
-  previewMsg += `\n👇 *Tap "Select Vendor" below to connect directly:*`;
+  // Build Native Slide-Up List Menu
+  const spotlightInPrimary = primaryDisplay.filter(v => isSpotlightBusiness(v.businessName) || v.isHighlyRecommended);
+  const organicInPrimary = primaryDisplay.filter(v => !(isSpotlightBusiness(v.businessName) || v.isHighlyRecommended));
 
-  // Build Native Slide-Up List Menu Sections
   const menuSections: any[] = [];
 
-  if (primaryDisplay.length > 0) {
+  if (spotlightInPrimary.length > 0) {
     menuSections.push({
-      title: targetLoc ? `📍 Vendors in ${targetLoc.substring(0, 18)}` : '⭐ Top Verified Vendors',
-      rows: primaryDisplay.map((v, idx) => ({
-        id: `connect_biz_${v.id}`,
-        title: `${idx + 1}. ${v.businessName}`.substring(0, 24),
-        description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
-      })),
+      title: '⭐ Spotlight Recommendations',
+      rows: spotlightInPrimary.map((v) => {
+        const fullIdx = primaryDisplay.findIndex(p => p.id === v.id) + 1;
+        return {
+          id: `connect_biz_${v.id}`,
+          title: `${fullIdx}. ⭐ ${v.businessName}`.substring(0, 24),
+          description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
+        };
+      }),
     });
   }
 
-  if (recDisplay.length > 0) {
+  if (organicInPrimary.length > 0) {
     menuSections.push({
-      title: '💡 Check This Out (Other Areas)',
-      rows: recDisplay.map((v) => ({
-        id: `connect_biz_${v.id}`,
-        title: `✨ ${v.businessName}`.substring(0, 24),
-        description: `${v.city || v.state}: ${v.product}`.substring(0, 72),
-      })),
+      title: '📍 Verified Sellers',
+      rows: organicInPrimary.map((v) => {
+        const fullIdx = primaryDisplay.findIndex(p => p.id === v.id) + 1;
+        return {
+          id: `connect_biz_${v.id}`,
+          title: `${fullIdx}. ${v.businessName}`.substring(0, 24),
+          description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
+        };
+      }),
     });
   }
 
-  if (allMatches.length > primaryDisplay.length + recDisplay.length) {
+  if (prioritizedListings.length > 10) {
     menuSections.push({
       title: '⚡ More Options',
       rows: [
         {
-          id: 'btn_next_5_vendors',
-          title: '➡️ Next Vendors',
-          description: `View remaining verified sellers`,
+          id: 'btn_next_10_vendors',
+          title: '➡️ Next 10 Vendors',
+          description: `View remaining (${prioritizedListings.length - 10} more sellers)`,
         },
         {
           id: 'btn_find_product',
@@ -1129,7 +1169,7 @@ async function execute5CardSearch(toPhone: string, senderName: string, params: {
     });
   } else {
     menuSections.push({
-      title: '⚡ Navigation',
+      title: '⚡ Quick Actions',
       rows: [
         {
           id: 'btn_find_product',
@@ -1159,10 +1199,13 @@ async function execute5CardSearch(toPhone: string, senderName: string, params: {
   });
 }
 
+// Alias for backward compatibility
+const execute5CardSearch = execute10CardSearch;
+
 /**
- * Handle Next 5 Vendors Pagination
+ * Handle Next 10 Vendors Pagination
  */
-async function handleShowNext5Vendors(toPhone: string, senderName: string, session: any) {
+async function handleShowNext10Vendors(toPhone: string, senderName: string, session: any) {
   const search = session.searchState;
   if (!search || !search.allMatchingListings || search.allMatchingListings.length === 0) {
     await sendWelcomeGreeting(toPhone, senderName);
@@ -1170,10 +1213,10 @@ async function handleShowNext5Vendors(toPhone: string, senderName: string, sessi
   }
 
   const nextPage = (search.pageIndex || 0) + 1;
-  const startIdx = nextPage * 5;
-  const next5 = search.allMatchingListings.slice(startIdx, startIdx + 5);
+  const startIdx = nextPage * 10;
+  const next10 = search.allMatchingListings.slice(startIdx, startIdx + 10);
 
-  if (next5.length === 0) {
+  if (next10.length === 0) {
     await sendWhatsAppMessage(
       toPhone,
       `🏁 *You've viewed all ${search.allMatchingListings.length} verified vendors for "${search.cleanProduct}".*\n\nWould you like to try another market or search a new item?`,
@@ -1197,44 +1240,63 @@ async function handleShowNext5Vendors(toPhone: string, senderName: string, sessi
   });
 
   let previewMsg =
-    `🔍 *Showing Vendors ${startIdx + 1}–${startIdx + next5.length} of ${search.allMatchingListings.length} for "${search.cleanProduct}":*\n\n`;
+    `🔍 *Showing Vendors ${startIdx + 1}–${startIdx + next10.length} of ${search.allMatchingListings.length} for "${search.cleanProduct}":*\n\n`;
 
-  for (let i = 0; i < next5.length; i++) {
-    const v = next5[i];
-    previewMsg +=
-      `━━━━━━━━━━━━━━━━━━━━\n` +
-      `*${startIdx + i + 1}️⃣ ${v.businessName}*\n` +
-      `📍 *Location:* ${v.city || v.state}\n` +
-      `🏷️ *In Stock:* ${v.product}\n` +
-      `💰 *Price:* ${v.price || 'Market Rate'}\n`;
+  for (let i = 0; i < next10.length; i++) {
+    const v = next10[i];
+    const priceDisplay = v.price || 'Market Rate';
+    const spotlightTag = (isSpotlightBusiness(v.businessName) || v.isHighlyRecommended) ? ' ⭐' : '';
+    previewMsg += `${startIdx + i + 1}. *${v.businessName}*${spotlightTag} — ${v.product} (${priceDisplay})\n`;
   }
 
-  previewMsg += `━━━━━━━━━━━━━━━━━━━━\n\n👇 *Tap "Select Vendor" below to connect:*`;
+  previewMsg +=
+    `────────────────────\n` +
+    `💡 *How to select:*\n` +
+    `• Tap *"Select Vendor"* below, OR\n` +
+    `• Reply with the number or vendor name`;
 
-  const listRows = next5.map((v: any, idx: number) => ({
+  const listRows = next10.map((v: any, idx: number) => ({
     id: `connect_biz_${v.id}`,
     title: `${startIdx + idx + 1}. ${v.businessName}`.substring(0, 24),
     description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
   }));
 
+  const menuSections: any[] = [
+    {
+      title: `Shops (${startIdx + 1}–${startIdx + next10.length})`,
+      rows: listRows,
+    },
+  ];
+
+  if (search.allMatchingListings.length > startIdx + next10.length) {
+    menuSections.push({
+      title: '⚡ More Options',
+      rows: [
+        {
+          id: 'btn_next_10_vendors',
+          title: '➡️ Next 10 Vendors',
+          description: `View next batch of sellers`,
+        },
+      ],
+    });
+  }
+
   await sendWhatsAppMessage(toPhone, previewMsg, {
     listMenu: {
       buttonText: '📋 Select Vendor',
       title: 'Verified Vendors',
-      sections: [
-        {
-          title: `Shops (${startIdx + 1}–${startIdx + next5.length})`,
-          rows: listRows,
-        },
-      ],
+      sections: menuSections,
     },
   });
 }
 
+// Alias for backward compatibility
+const handleShowNext5Vendors = handleShowNext10Vendors;
+
 /**
- * 3. 2-STEP LEAD QUALIFICATION & SELLER HANDOFF
+ * 3. 3-STEP LEAD QUALIFICATION & SELLER HANDOFF
  */
-async function start2StepLeadQualification(toPhone: string, senderName: string, bizId: string) {
+async function start3StepLeadQualification(toPhone: string, senderName: string, bizId: string) {
   const listing = sheetsDb.getListingById(bizId);
   const bizName = listing?.businessName || 'Verified Vendor';
   const bizPhone = listing?.whatsapp || '';
@@ -1251,20 +1313,23 @@ async function start2StepLeadQualification(toPhone: string, senderName: string, 
   await sendWhatsAppMessage(
     toPhone,
     `🎯 *Connecting you with ${bizName}...*\n\n` +
-    `*Step 1 of 2: Are you buying for personal use or wholesale?*`,
+    `*Step 1 of 3: Are you buying for personal use or wholesale / bulk?*`,
     {
       quickReplies: [
-        { id: 'vol_retail', title: '🛍️ Retail Order' },
-        { id: 'vol_wholesale', title: '📦 Wholesale Order' },
+        { id: 'vol_retail', title: '🛍️ Personal / Retail' },
+        { id: 'vol_wholesale', title: '📦 Wholesale / Bulk' },
       ],
     }
   );
 }
 
-async function finish2StepQualificationHandoff(
+// Alias for backward compatibility
+const start2StepLeadQualification = start3StepLeadQualification;
+
+async function finish3StepQualificationHandoff(
   toPhone: string,
   senderName: string,
-  fulfillment: 'Shop Visit' | 'Local City Delivery' | 'Interstate Waybill',
+  buyerLocation: string,
   session: any
 ) {
   const bizName = session.activeVendorName || 'Verified Vendor';
@@ -1272,9 +1337,28 @@ async function finish2StepQualificationHandoff(
   const cleanBizPhone = normalizePhone(rawBizPhone).replace(/^0/, '234');
   const item = session.activeItem || 'In-Stock Goods';
   const volume = session.orderVolume || 'Retail';
+  const fulfillment = session.fulfillment || 'Local City Delivery';
+  const location = buyerLocation || session.buyerLocation || 'Nigeria';
 
-  // Build clean pre-filled WhatsApp deal brief
-  const prefilledText = `Hi ${bizName}, I found you on FLOATE.\n• Item: ${item}\n• Order Type: ${volume}\n• Fulfillment: ${fulfillment}\nAre you available with this in stock?`;
+  // Save qualified lead to Firestore for seller analytics & conversion tracking
+  try {
+    await firestoreDb.recordWhatsAppLead({
+      buyerPhone: toPhone,
+      buyerName: senderName,
+      merchantId: session.activeVendorId || '',
+      merchantName: bizName,
+      merchantWhatsapp: rawBizPhone,
+      item,
+      orderVolume: volume,
+      fulfillment,
+      buyerLocation: location,
+    });
+  } catch (err) {
+    console.error('[WhatsApp Lead Record Error]:', err);
+  }
+
+  // Build clean pre-filled WhatsApp message: HI [BUSINESS NAME], I found you on FLOATE.
+  const prefilledText = `HI ${bizName.toUpperCase()}, I found you on FLOATE.`;
   const waLink = `https://wa.me/${cleanBizPhone}?text=${encodeURIComponent(prefilledText)}`;
 
   resetWhatsAppSession(toPhone);
@@ -1284,9 +1368,10 @@ async function finish2StepQualificationHandoff(
     `🏬 *Vendor:* ${bizName}\n` +
     `📦 *Item:* ${item}\n` +
     `🛍️ *Order Type:* ${volume}\n` +
-    `🚚 *Fulfillment:* ${fulfillment}\n\n` +
+    `🚚 *Fulfillment:* ${fulfillment}\n` +
+    `📍 *Buyer Location:* ${location}\n\n` +
     `👉 *Connect to vendor:*\n` +
-    `Tap the button below to message ${bizName} directly on WhatsApp with your pre-packaged deal brief.\n\n` +
+    `Tap the button below to message ${bizName} directly on WhatsApp:\n\n` +
     `⚠️ *Buyer Safety:* _Always inspect items or agree on safe payment before sending money. FLOATE connects buyers and sellers with zero commission._`;
 
   await sendWhatsAppMessage(toPhone, handoffMsg, {
@@ -1298,6 +1383,10 @@ async function finish2StepQualificationHandoff(
     },
   });
 }
+
+// Alias for backward compatibility
+const finish2StepQualificationHandoff = (toPhone: string, senderName: string, ful: any, session: any) =>
+  finish3StepQualificationHandoff(toPhone, senderName, 'Nigeria', { ...session, fulfillment: ful });
 
 /**
  * 4. MARKET HUBS MENU
@@ -1342,31 +1431,69 @@ async function sendMarketHubsMenu(toPhone: string) {
 }
 
 /**
- * 5. VENDOR HUB & REGISTRATION ROUTING
+ * 5. VENDOR HUB & MERCHANT PORTAL (Self-Service Dashboard)
  */
 async function handleVendorHubRouting(toPhone: string, senderName: string) {
-  // Check if sender phone already exists in DB
-  const existingMerchant = await firestoreDb.getMerchant(toPhone);
+  // Check if sender phone matches a registered vendor in Firestore or Sheets
+  let existingMerchant = await firestoreDb.getMerchant(toPhone);
+  if (!existingMerchant) {
+    const sheetListing = sheetsDb.getListingByPhone(toPhone);
+    if (sheetListing) {
+      existingMerchant = {
+        id: sheetListing.id,
+        businessName: sheetListing.businessName,
+        ownerFullName: sheetListing.ownerFullName,
+        whatsapp: sheetListing.whatsapp,
+        city: sheetListing.city,
+        state: sheetListing.state,
+        category: sheetListing.category,
+        credit_balance: 1000,
+        status: 'ACTIVE',
+        isVerified: sheetListing.isVerified,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+  }
 
-  // SCENARIO A: Existing Registered Vendor
+  // SCENARIO A: Existing Registered Vendor -> Auto Phone Recognition & Merchant Dashboard
   if (existingMerchant && existingMerchant.businessName) {
+    updateWhatsAppSession(toPhone, { state: 'VENDOR_PORTAL' });
+    const stats = await firestoreDb.getMerchantStats(toPhone);
+
     const hubMsg =
+      `🏪 *FLOATE MERCHANT DASHBOARD*\n\n` +
       `👋 *Welcome back, ${existingMerchant.businessName}!*` +
       (existingMerchant.ownerFullName ? `\n👤 *Owner:* ${existingMerchant.ownerFullName}` : '') +
       `\n📍 *Location:* ${existingMerchant.city || existingMerchant.state || 'Nigeria'}\n` +
-      `🟢 *Status:* Active Verified Vendor\n\n` +
-      `📊 *Your Performance (Last 30 Days):*\n` +
-      `• 👥 *Buyer Inquiries:* 48 qualified leads\n` +
-      `• 🔍 *Search Appearances:* 240+ times\n` +
-      `• 🏷️ *Status:* 🟢 Live in Market Directory\n\n` +
-      `What would you like to do?`;
+      `🟢 *Status:* ${existingMerchant.isVerified ? '✓ Verified Active Merchant' : 'Active'}\n\n` +
+      `📊 *Live Performance Overview:*\n` +
+      `• 🔍 *Search Appearances:* ${stats.appearances} views\n` +
+      `• 👥 *Direct Buyer Leads:* ${stats.leadsGenerated} inquiries\n` +
+      `• 📦 *Active Products:* ${stats.productCount} items listed\n` +
+      `• 💳 *Credit Balance:* ₦${stats.balance.toLocaleString()}\n\n` +
+      `*Merchant Management Options:*\n` +
+      `1️⃣ 📊 View Performance & Stats\n` +
+      `2️⃣ 📦 Add New Product / Service\n` +
+      `3️⃣ ✏️ Edit Listings & Prices\n` +
+      `4️⃣ 🗑️ Delete / Deactivate Account\n\n` +
+      `_Tap an option below or reply with a number (1-4):_`;
 
     await sendWhatsAppMessage(toPhone, hubMsg, {
-      quickReplies: [
-        { id: 'btn_find_product', title: '🔍 Search Items' },
-        { id: 'btn_browse_markets', title: '📍 Browse Markets' },
-        { id: 'btn_home', title: '🏠 Main Menu' },
-      ],
+      listMenu: {
+        buttonText: '⚙️ Manage Business',
+        title: 'Merchant Self-Service',
+        sections: [
+          {
+            title: '🏪 Merchant Options',
+            rows: [
+              { id: 'btn_vendor_stats', title: '📊 Performance & Stats', description: 'Search appearances and customer leads' },
+              { id: 'btn_vendor_add_product', title: '📦 Add New Product', description: 'Add item, price & description' },
+              { id: 'btn_vendor_edit_products', title: '✏️ Edit Listings & Prices', description: 'Update inventory, prices & items' },
+              { id: 'btn_vendor_delete_account', title: '🗑️ Delete / Deactivate', description: 'Remove business from Floate search' },
+            ],
+          },
+        ],
+      },
     });
     return;
   }
@@ -1375,11 +1502,12 @@ async function handleVendorHubRouting(toPhone: string, senderName: string) {
   const introMsg =
     `🏪 *Grow Your Business with FLOATE!*\n\n` +
     `List your shop to start receiving direct, qualified buyer inquiries on WhatsApp with **zero commission**.\n\n` +
+    `💡 *Tip:* Save this number as *FLOATE* to easily manage your store anytime!\n\n` +
     `✨ *What you get:*\n` +
     `• 🟢 Verified Vendor badge\n` +
     `• 📈 Direct wholesale & retail buyers\n` +
     `• 📍 Market hub listing (Alaba, Onitsha, Balogun, Aba, Kano, etc.)\n\n` +
-    `*Tap below to start your quick 6-step registration:*`;
+    `*Choose an option below:*`;
 
   await sendWhatsAppMessage(toPhone, introMsg, {
     quickReplies: [
@@ -1388,6 +1516,353 @@ async function handleVendorHubRouting(toPhone: string, senderName: string) {
       { id: 'btn_home', title: '🏠 Main Menu' },
     ],
   });
+}
+
+/**
+ * 5a. Performance & Stats
+ */
+async function handleVendorStats(toPhone: string, senderName: string) {
+  const merchant = await firestoreDb.getMerchant(toPhone) || sheetsDb.getListingByPhone(toPhone);
+  const bizName = merchant?.businessName || 'Your Business';
+  const stats = await firestoreDb.getMerchantStats(toPhone);
+
+  const statsMsg =
+    `📊 *MERCHANT PERFORMANCE & STATS*\n\n` +
+    `🏬 *Business:* ${bizName}\n` +
+    `🟢 *Status:* ${stats.isVerified ? '✓ Verified Active Merchant' : 'Active'}\n` +
+    `📅 *Listed Since:* ${stats.registeredSince}\n\n` +
+    `📈 *Key Metrics:*\n` +
+    `• 🔍 *Search Appearances:* ${stats.appearances} times in FLOATE discovery\n` +
+    `• 👥 *Buyer Inquiries / Leads:* ${stats.leadsGenerated} direct customer leads\n` +
+    `• 📦 *Active Items in Catalog:* ${stats.productCount} products\n` +
+    `• 💳 *Store Credit Balance:* ₦${stats.balance.toLocaleString()}\n\n` +
+    `_Your store is live and actively matched to buyers searching on WhatsApp and Web._`;
+
+  updateWhatsAppSession(toPhone, { state: 'VENDOR_PORTAL' });
+
+  await sendWhatsAppMessage(toPhone, statsMsg, {
+    quickReplies: [
+      { id: 'btn_vendor_add_product', title: '📦 Add Product' },
+      { id: 'btn_vendor_edit_products', title: '✏️ Edit Listings' },
+      { id: 'btn_for_businesses', title: '🏪 Store Menu' },
+    ],
+  });
+}
+
+/**
+ * 5b. Add New Product / Service Flow
+ */
+async function startVendorAddProduct(toPhone: string, senderName: string) {
+  updateWhatsAppSession(toPhone, {
+    state: 'VENDOR_ADD_PRODUCT',
+    vendorAddDraft: {
+      step: 'NAME',
+      updatedAt: new Date().toISOString(),
+    },
+  });
+
+  await sendWhatsAppMessage(
+    toPhone,
+    `📦 *Add New Product / Service (Step 1/3)*\n\n` +
+    `What is the **name** or title of the item you want to list?\n\n` +
+    `_(e.g., Italian Men Leather Shoes Size 42-45, 5kVA Solar Inverter System, or Wholesale Dubai Abaya Gowns)_\n\n` +
+    `_Type *Cancel* anytime to return._`
+  );
+}
+
+async function handleVendorAddProductStep(toPhone: string, senderName: string, text: string, session: any) {
+  const draft = session.vendorAddDraft || { step: 'NAME', updatedAt: new Date().toISOString() };
+  const cleanInput = text.trim();
+
+  if (/^(cancel|exit|stop|menu|home)$/i.test(cleanInput)) {
+    updateWhatsAppSession(toPhone, { state: 'VENDOR_PORTAL', vendorAddDraft: undefined });
+    await handleVendorHubRouting(toPhone, senderName);
+    return;
+  }
+
+  if (draft.step === 'NAME') {
+    draft.productName = cleanInput;
+    draft.step = 'PRICE';
+    draft.updatedAt = new Date().toISOString();
+    updateWhatsAppSession(toPhone, { vendorAddDraft: draft });
+
+    await sendWhatsAppMessage(
+      toPhone,
+      `💰 *Step 2/3: Set Product Price*\n\n` +
+      `What is the price for *${draft.productName}*?\n\n` +
+      `_(e.g., \`₦35,000\`, \`45k\`, \`₦12,500 per pair\`, or \`Negotiable\`)_`
+    );
+    return;
+  }
+
+  if (draft.step === 'PRICE') {
+    draft.price = cleanInput;
+    draft.step = 'DESC';
+    draft.updatedAt = new Date().toISOString();
+    updateWhatsAppSession(toPhone, { vendorAddDraft: draft });
+
+    await sendWhatsAppMessage(
+      toPhone,
+      `📝 *Step 3/3: Category / Description*\n\n` +
+      `Enter category or description for *${draft.productName}* (or type *Skip*):\n\n` +
+      `_(e.g., \`Fashion & Footwear\`, \`Electronics\`, \`Wholesale & Retail\`)_`
+    );
+    return;
+  }
+
+  if (draft.step === 'DESC') {
+    const descOrCat = cleanInput.toLowerCase() === 'skip' ? 'General' : cleanInput;
+    draft.description = descOrCat;
+    draft.category = descOrCat;
+
+    // Fetch merchant business details
+    const merchant = await firestoreDb.getMerchant(toPhone) || sheetsDb.getListingByPhone(toPhone);
+    const bizName = merchant?.businessName || 'Verified Merchant';
+    const state = merchant?.state || 'Lagos';
+    const city = merchant?.city || 'Trade Fair';
+
+    // Save to Firestore and Sheets
+    const savedProd = await firestoreDb.saveProductListing({
+      userId: merchant?.userId || toPhone,
+      businessName: bizName,
+      whatsapp: toPhone,
+      state,
+      city,
+      category: draft.category || 'General',
+      product: draft.productName || 'New Product',
+      price: draft.price || 'Contact for Price',
+      negotiation: 'Yes',
+      specs: draft.description || '',
+    });
+
+    updateWhatsAppSession(toPhone, {
+      state: 'VENDOR_PORTAL',
+      vendorAddDraft: undefined,
+    });
+
+    const successMsg =
+      `🎉 *Product Successfully Published!* 🎉\n\n` +
+      `Your item is now live in FLOATE search index:\n\n` +
+      `📦 *Item:* ${savedProd.product}\n` +
+      `💰 *Price:* ${savedProd.price}\n` +
+      `📂 *Category:* ${savedProd.category}\n` +
+      `📍 *Location:* ${city}, ${state}\n` +
+      `🟢 *Status:* Live & Discoverable by Buyers!\n\n` +
+      `What would you like to do next?`;
+
+    await sendWhatsAppMessage(toPhone, successMsg, {
+      quickReplies: [
+        { id: 'btn_vendor_add_product', title: '📦 Add Another' },
+        { id: 'btn_vendor_edit_products', title: '✏️ View Inventory' },
+        { id: 'btn_for_businesses', title: '🏪 Store Menu' },
+      ],
+    });
+  }
+}
+
+/**
+ * 5c. Edit Listings & Prices Flow
+ */
+async function startVendorEditProducts(toPhone: string, senderName: string) {
+  const products = await firestoreDb.getProductsByMerchant(toPhone);
+  if (!products || products.length === 0) {
+    await sendWhatsAppMessage(
+      toPhone,
+      `📦 *No products found in your catalog yet.*\n\nTap below to add your first product listing:`,
+      {
+        quickReplies: [
+          { id: 'btn_vendor_add_product', title: '📦 Add Product' },
+          { id: 'btn_for_businesses', title: '🏪 Store Menu' },
+          { id: 'btn_home', title: '🏠 Main Menu' },
+        ],
+      }
+    );
+    return;
+  }
+
+  // Display inventory items with numbers
+  let listText = `📦 *YOUR STORE INVENTORY (${products.length} Items)*\n\n`;
+  products.slice(0, 10).forEach((p, idx) => {
+    listText += `${idx + 1}️⃣ *${p.product}*\n   💰 Price: ${p.price}\n   📂 Category: ${p.category}\n\n`;
+  });
+
+  listText += `💬 *Reply with the item number (e.g. \`1\` or \`2\`)* to update its price or remove it.`;
+
+  updateWhatsAppSession(toPhone, {
+    state: 'VENDOR_EDIT_PRODUCTS',
+    vendorEditDraft: {
+      step: 'SELECT',
+      updatedAt: new Date().toISOString(),
+    },
+  });
+
+  await sendWhatsAppMessage(toPhone, listText, {
+    quickReplies: [
+      { id: 'btn_vendor_add_product', title: '📦 Add New Item' },
+      { id: 'btn_for_businesses', title: '🏪 Store Menu' },
+      { id: 'btn_home', title: '🏠 Main Menu' },
+    ],
+  });
+}
+
+async function handleVendorEditProductsStep(toPhone: string, senderName: string, text: string, session: any) {
+  const draft = session.vendorEditDraft || { step: 'SELECT', updatedAt: new Date().toISOString() };
+  const cleanInput = text.trim();
+  const cleanLower = cleanInput.toLowerCase();
+
+  if (/^(cancel|exit|stop|menu|home|btn_home)$/i.test(cleanLower)) {
+    updateWhatsAppSession(toPhone, { state: 'VENDOR_PORTAL', vendorEditDraft: undefined });
+    await handleVendorHubRouting(toPhone, senderName);
+    return;
+  }
+
+  const products = await firestoreDb.getProductsByMerchant(toPhone);
+
+  if (draft.step === 'SELECT') {
+    const num = parseInt(cleanInput, 10);
+    if (isNaN(num) || num < 1 || num > products.length) {
+      await sendWhatsAppMessage(toPhone, `⚠️ Please reply with a valid item number (1 - ${products.length}), or type *Cancel*.`);
+      return;
+    }
+
+    const selected = products[num - 1];
+    draft.selectedProductId = selected.id;
+    draft.selectedProductName = selected.product;
+    draft.step = 'ACTION';
+    draft.updatedAt = new Date().toISOString();
+    updateWhatsAppSession(toPhone, { vendorEditDraft: draft });
+
+    const manageMsg =
+      `✏️ *Managing Item: ${selected.product}*\n\n` +
+      `• 💰 *Current Price:* ${selected.price}\n` +
+      `• 📂 *Category:* ${selected.category}\n\n` +
+      `*What would you like to update?*`;
+
+    await sendWhatsAppMessage(toPhone, manageMsg, {
+      quickReplies: [
+        { id: 'btn_edit_price', title: '💰 Update Price' },
+        { id: 'btn_delete_item', title: '🗑️ Delete Item' },
+        { id: 'btn_vendor_edit_products', title: '↩️ Back to List' },
+      ],
+    });
+    return;
+  }
+
+  if (draft.step === 'ACTION') {
+    if (text === 'btn_edit_price' || /^(price|update price|edit price|1)$/i.test(cleanLower)) {
+      draft.action = 'PRICE';
+      draft.step = 'VALUE';
+      draft.updatedAt = new Date().toISOString();
+      updateWhatsAppSession(toPhone, { vendorEditDraft: draft });
+
+      await sendWhatsAppMessage(
+        toPhone,
+        `💰 *Enter New Price for "${draft.selectedProductName}":*\n\n_(e.g. \`₦40,000\`, \`25k\`, or \`Negotiable\`)_`
+      );
+      return;
+    }
+
+    if (text === 'btn_delete_item' || /^(delete|remove|delete item|2)$/i.test(cleanLower)) {
+      if (draft.selectedProductId) {
+        await firestoreDb.deleteProductById(draft.selectedProductId);
+      }
+      updateWhatsAppSession(toPhone, { state: 'VENDOR_PORTAL', vendorEditDraft: undefined });
+
+      await sendWhatsAppMessage(
+        toPhone,
+        `🗑️ *Item Deleted.*\n*"${draft.selectedProductName}"* has been removed from your store catalog.`,
+        {
+          quickReplies: [
+            { id: 'btn_vendor_edit_products', title: '✏️ View Listings' },
+            { id: 'btn_vendor_add_product', title: '📦 Add Item' },
+            { id: 'btn_for_businesses', title: '🏪 Store Menu' },
+          ],
+        }
+      );
+      return;
+    }
+
+    if (text === 'btn_vendor_edit_products' || cleanLower === 'back') {
+      await startVendorEditProducts(toPhone, senderName);
+      return;
+    }
+  }
+
+  if (draft.step === 'VALUE' && draft.action === 'PRICE') {
+    if (draft.selectedProductId) {
+      await firestoreDb.updateProduct(draft.selectedProductId, { price: cleanInput });
+    }
+
+    updateWhatsAppSession(toPhone, { state: 'VENDOR_PORTAL', vendorEditDraft: undefined });
+
+    await sendWhatsAppMessage(
+      toPhone,
+      `✅ *Price Updated Successfully!*\n\n` +
+      `📦 *Item:* ${draft.selectedProductName}\n` +
+      `💰 *New Price:* ${cleanInput}\n\n` +
+      `Your updated price is now live on FLOATE!`,
+      {
+        quickReplies: [
+          { id: 'btn_vendor_edit_products', title: '✏️ View Inventory' },
+          { id: 'btn_vendor_add_product', title: '📦 Add Item' },
+          { id: 'btn_for_businesses', title: '🏪 Store Menu' },
+        ],
+      }
+    );
+  }
+}
+
+/**
+ * 5d. Delete Store Account Flow
+ */
+async function startVendorDeleteAccount(toPhone: string, senderName: string) {
+  const merchant = await firestoreDb.getMerchant(toPhone) || sheetsDb.getListingByPhone(toPhone);
+  const bizName = merchant?.businessName || 'Your Store';
+  const products = await firestoreDb.getProductsByMerchant(toPhone);
+
+  updateWhatsAppSession(toPhone, { state: 'VENDOR_DELETE_CONFIRM' });
+
+  const warnMsg =
+    `⚠️ *DANGER ZONE: Delete & Deactivate Store*\n\n` +
+    `Are you sure you want to remove *${bizName}* from FLOATE?\n\n` +
+    `• Your business profile will be deleted.\n` +
+    `• All *${products.length} product listings* will be removed from search.\n` +
+    `• You will stop receiving buyer inquiries.\n\n` +
+    `*This action cannot be undone.*`;
+
+  await sendWhatsAppMessage(toPhone, warnMsg, {
+    quickReplies: [
+      { id: 'btn_confirm_delete_account', title: '🗑️ Yes, Delete Store' },
+      { id: 'btn_for_businesses', title: '❌ Cancel, Keep Store' },
+      { id: 'btn_home', title: '🏠 Main Menu' },
+    ],
+  });
+}
+
+async function handleVendorDeleteAccountConfirm(toPhone: string, senderName: string, text: string) {
+  if (text === 'btn_confirm_delete_account' || /^(yes|confirm|delete my store|yes delete)$/i.test(text.trim())) {
+    await firestoreDb.deleteMerchant(toPhone);
+    resetWhatsAppSession(toPhone);
+
+    await sendWhatsAppMessage(
+      toPhone,
+      `✅ *Store Account Deleted.*\n\n` +
+      `Your business profile and listings have been removed from the FLOATE directory.\n\n` +
+      `You can re-register anytime whenever you are ready!`,
+      {
+        quickReplies: [
+          { id: 'btn_start_registration', title: '📝 Register New Shop' },
+          { id: 'btn_find_product', title: '🔍 Search Items' },
+          { id: 'btn_home', title: '🏠 Main Menu' },
+        ],
+      }
+    );
+    return;
+  }
+
+  // Cancelled
+  updateWhatsAppSession(toPhone, { state: 'VENDOR_PORTAL' });
+  await handleVendorHubRouting(toPhone, senderName);
 }
 
 /**
