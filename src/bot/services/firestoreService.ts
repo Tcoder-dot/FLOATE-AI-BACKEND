@@ -176,6 +176,7 @@ export interface UserSessionDoc {
   budget?: string;
   urgency?: string;
   activeQualificationId?: string;
+  hasSeenSaveTip?: boolean;
   updatedAt: string;
 }
 
@@ -428,6 +429,7 @@ export class FirestoreService {
           budget: raw.budget ?? '',
           urgency: raw.urgency ?? '',
           activeQualificationId: raw.activeQualificationId ?? '',
+          hasSeenSaveTip: raw.hasSeenSaveTip === true,
           updatedAt: raw.updatedAt || new Date().toISOString(),
         };
         this.localSessions.set(key, sess);
@@ -449,6 +451,7 @@ export class FirestoreService {
       budget: '',
       urgency: '',
       activeQualificationId: '',
+      hasSeenSaveTip: false,
       updatedAt: new Date().toISOString(),
     };
     this.localSessions.set(key, defaultSession);
@@ -478,6 +481,7 @@ export class FirestoreService {
       budget: rawUpdated.budget ?? '',
       urgency: rawUpdated.urgency ?? '',
       activeQualificationId: rawUpdated.activeQualificationId ?? '',
+      hasSeenSaveTip: rawUpdated.hasSeenSaveTip ?? current.hasSeenSaveTip ?? false,
       updatedAt: rawUpdated.updatedAt,
     };
 
@@ -494,6 +498,7 @@ export class FirestoreService {
   }
 
   public async resetUserSession(userId: string | number): Promise<void> {
+    const current = await this.getUserSession(userId);
     await this.setUserSession(userId, {
       state: 'IDLE_SEARCH',
       selectedMerchantId: '',
@@ -505,7 +510,17 @@ export class FirestoreService {
       budget: '',
       urgency: '',
       activeQualificationId: '',
+      hasSeenSaveTip: current.hasSeenSaveTip ?? false,
     });
+  }
+
+  public async hasUserSeenSaveTip(userId: string | number): Promise<boolean> {
+    const sess = await this.getUserSession(userId);
+    return sess.hasSeenSaveTip === true;
+  }
+
+  public async markUserSeenSaveTip(userId: string | number): Promise<void> {
+    await this.setUserSession(userId, { hasSeenSaveTip: true });
   }
 
   /**

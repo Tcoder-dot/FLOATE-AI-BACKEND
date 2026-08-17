@@ -529,8 +529,9 @@ export async function processMasterWhatsAppEngine(params: {
   }
 
   // 2. Welcome / Greeting / HELLO FLOATE Intent Trigger
-  if (/^(hello floate|hello_floate|hellofloate|hi|hello|hey|good morning|good afternoon|good evening|start|btn_greeting)$/i.test(cleanLower)) {
+  if (/^(hello floate|hello_floate|hellofloate|hi floate|hi_floate|hifloate|hi|hello|hey|good morning|good afternoon|good evening|start|btn_greeting|btn_home)$/i.test(cleanLower)) {
     resetWhatsAppSession(senderPhone);
+    await firestoreDb.resetUserSession(senderPhone);
     await sendWelcomeGreeting(senderPhone, senderName);
     return;
   }
@@ -933,15 +934,32 @@ export async function processMasterWhatsAppEngine(params: {
  * 1. THE NATIVE WELCOME GREETING
  */
 async function sendWelcomeGreeting(toPhone: string, senderName: string) {
-  const name = senderName && senderName !== 'Customer' ? senderName : '';
-  const greeting = name ? `👋 Hi ${name}, Floate here,` : `👋 Hi, Floate here,`;
+  const session = getWhatsAppSession(toPhone);
+  const alreadySeenTip = session.hasSeenSaveTip || (await firestoreDb.hasUserSeenSaveTip(toPhone));
 
-  const msg =
-    `${greeting}\n\n` +
-    `I'm here to help you find verified vendors, products, and services across Nigeria.\n\n` +
-    `💡 *Tip:* Save this number as *FLOATE* so you can easily search items and message verified sellers anytime!\n\n` +
-    `*What are you shopping for today?*\n` +
-    `Choose an option below:`;
+  const name = senderName && senderName !== 'Customer' ? senderName : '';
+  const greeting = name ? `👋 Hello ${name} 😌` : `👋 Hello 😌`;
+
+  let msg = '';
+  if (!alreadySeenTip) {
+    // First-time greeting for new numbers
+    msg =
+      `${greeting}\n\n` +
+      `I'm here to help you find verified vendors, products, and services across Nigeria.\n\n` +
+      `💡 *Tip:* Save this number as *FLOATE* so you can easily search items and message verified sellers anytime!\n\n` +
+      `What would you like to shop for today?\n` +
+      `Choose an option below:`;
+
+    // Mark that this user has received the save tip
+    updateWhatsAppSession(toPhone, { hasSeenSaveTip: true });
+    await firestoreDb.markUserSeenSaveTip(toPhone);
+  } else {
+    // Returning user greeting (Clean & uncluttered without tip)
+    msg =
+      `${greeting}\n\n` +
+      `What would you like to shop for today?\n` +
+      `Choose an option below:`;
+  }
 
   await sendWhatsAppMessage(toPhone, msg, {
     quickReplies: [
@@ -1064,7 +1082,6 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
   }
 
   // 3. Spotlight Prioritization with Organic Fallback:
-  // Separate into Spotlight listings and Organic listings
   const spotlightMatches: BusinessListing[] = [];
   const organicMatches: BusinessListing[] = [];
 
@@ -1096,36 +1113,51 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
     },
   });
 
-  const locNotice = targetLoc ? ` in *${targetLoc}*` : '';
-  let previewMsg = `🔍 *Verified sellers for "${cleanProduct}"${locNotice}:*\n\n`;
+  const spotlightInPrimary = primaryDisplay.filter(v => isSpotlightBusiness(v.businessName) || v.isHighlyRecommended);
+  const organicInPrimary = primaryDisplay.filter(v => !(isSpotlightBusiness(v.businessName) || v.isHighlyRecommended));
 
-  for (let i = 0; i < primaryDisplay.length; i++) {
-    const v = primaryDisplay[i];
-    const priceDisplay = v.price || 'Market Rate';
-    const spotlightTag = (isSpotlightBusiness(v.businessName) || v.isHighlyRecommended) ? ' ⭐' : '';
-    previewMsg += `${i + 1}. *${v.businessName}*${spotlightTag} — ${v.product} (${priceDisplay})\n`;
+  const locNotice = targetLoc ? ` in *${targetLoc}*` : '';
+  let previewMsg = `🔍 *Businesses matching "${cleanProduct}"${locNotice}:*\n\n`;
+
+  if (spotlightInPrimary.length > 0) {
+    previewMsg += `*Top Spotlight Businesses*\n\n`;
+    for (let i = 0; i < spotlightInPrimary.length; i++) {
+      const v = spotlightInPrimary[i];
+      const idx = primaryDisplay.indexOf(v) + 1;
+      const priceDisplay = v.price || 'Market Rate';
+      previewMsg += `${idx}. *${v.businessName}* — ${v.product} (${priceDisplay})\n\n`;
+    }
+  }
+
+  if (organicInPrimary.length > 0) {
+    if (spotlightInPrimary.length > 0) {
+      previewMsg += `*Verified Vendors*\n\n`;
+    }
+    for (let i = 0; i < organicInPrimary.length; i++) {
+      const v = organicInPrimary[i];
+      const idx = primaryDisplay.indexOf(v) + 1;
+      const priceDisplay = v.price || 'Market Rate';
+      previewMsg += `${idx}. *${v.businessName}* — ${v.product} (${priceDisplay})\n\n`;
+    }
   }
 
   previewMsg +=
     `────────────────────\n` +
     `💡 *How to select:*\n` +
     `• Tap *"Select Vendor"* below, OR\n` +
-    `• Reply with the number (e.g. \`1\`, \`2\`, \`3\`) or vendor name`;
+    `• Reply with the number (e.g. \`1\`, \`2\`, \`3\`) or business name`;
 
   // Build Native Slide-Up List Menu
-  const spotlightInPrimary = primaryDisplay.filter(v => isSpotlightBusiness(v.businessName) || v.isHighlyRecommended);
-  const organicInPrimary = primaryDisplay.filter(v => !(isSpotlightBusiness(v.businessName) || v.isHighlyRecommended));
-
   const menuSections: any[] = [];
 
   if (spotlightInPrimary.length > 0) {
     menuSections.push({
-      title: '⭐ Spotlight Recommendations',
+      title: 'Top Spotlight Businesses',
       rows: spotlightInPrimary.map((v) => {
         const fullIdx = primaryDisplay.findIndex(p => p.id === v.id) + 1;
         return {
           id: `connect_biz_${v.id}`,
-          title: `${fullIdx}. ⭐ ${v.businessName}`.substring(0, 24),
+          title: `${fullIdx}. ${v.businessName}`.substring(0, 24),
           description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
         };
       }),
@@ -1134,7 +1166,7 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
 
   if (organicInPrimary.length > 0) {
     menuSections.push({
-      title: '📍 Verified Sellers',
+      title: 'Verified Vendors',
       rows: organicInPrimary.map((v) => {
         const fullIdx = primaryDisplay.findIndex(p => p.id === v.id) + 1;
         return {
@@ -1245,15 +1277,14 @@ async function handleShowNext10Vendors(toPhone: string, senderName: string, sess
   for (let i = 0; i < next10.length; i++) {
     const v = next10[i];
     const priceDisplay = v.price || 'Market Rate';
-    const spotlightTag = (isSpotlightBusiness(v.businessName) || v.isHighlyRecommended) ? ' ⭐' : '';
-    previewMsg += `${startIdx + i + 1}. *${v.businessName}*${spotlightTag} — ${v.product} (${priceDisplay})\n`;
+    previewMsg += `${startIdx + i + 1}. *${v.businessName}* — ${v.product} (${priceDisplay})\n\n`;
   }
 
   previewMsg +=
     `────────────────────\n` +
     `💡 *How to select:*\n` +
     `• Tap *"Select Vendor"* below, OR\n` +
-    `• Reply with the number or vendor name`;
+    `• Reply with the number or business name`;
 
   const listRows = next10.map((v: any, idx: number) => ({
     id: `connect_biz_${v.id}`,
@@ -1263,7 +1294,7 @@ async function handleShowNext10Vendors(toPhone: string, senderName: string, sess
 
   const menuSections: any[] = [
     {
-      title: `Shops (${startIdx + 1}–${startIdx + next10.length})`,
+      title: `Verified Vendors (${startIdx + 1}–${startIdx + next10.length})`,
       rows: listRows,
     },
   ];
@@ -1364,7 +1395,8 @@ async function finish3StepQualificationHandoff(
   resetWhatsAppSession(toPhone);
 
   const handoffMsg =
-    `✅ *Inquiry Pre-Packaged! Ready to Connect*\n\n` +
+    `✅ *Verified Seller Ready to Connect*\n\n` +
+    `🟢 *Status:* Verified Active Merchant\n` +
     `🏬 *Vendor:* ${bizName}\n` +
     `📦 *Item:* ${item}\n` +
     `🛍️ *Order Type:* ${volume}\n` +
@@ -1469,8 +1501,7 @@ async function handleVendorHubRouting(toPhone: string, senderName: string) {
       `📊 *Live Performance Overview:*\n` +
       `• 🔍 *Search Appearances:* ${stats.appearances} views\n` +
       `• 👥 *Direct Buyer Leads:* ${stats.leadsGenerated} inquiries\n` +
-      `• 📦 *Active Products:* ${stats.productCount} items listed\n` +
-      `• 💳 *Credit Balance:* ₦${stats.balance.toLocaleString()}\n\n` +
+      `• 📦 *Active Products:* ${stats.productCount} items listed\n\n` +
       `*Merchant Management Options:*\n` +
       `1️⃣ 📊 View Performance & Stats\n` +
       `2️⃣ 📦 Add New Product / Service\n` +
@@ -1534,8 +1565,7 @@ async function handleVendorStats(toPhone: string, senderName: string) {
     `📈 *Key Metrics:*\n` +
     `• 🔍 *Search Appearances:* ${stats.appearances} times in FLOATE discovery\n` +
     `• 👥 *Buyer Inquiries / Leads:* ${stats.leadsGenerated} direct customer leads\n` +
-    `• 📦 *Active Items in Catalog:* ${stats.productCount} products\n` +
-    `• 💳 *Store Credit Balance:* ₦${stats.balance.toLocaleString()}\n\n` +
+    `• 📦 *Active Items in Catalog:* ${stats.productCount} products\n\n` +
     `_Your store is live and actively matched to buyers searching on WhatsApp and Web._`;
 
   updateWhatsAppSession(toPhone, { state: 'VENDOR_PORTAL' });

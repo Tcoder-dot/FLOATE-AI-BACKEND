@@ -92,6 +92,7 @@ export interface WhatsAppUserSessionState {
   vendorAddDraft?: WhatsAppVendorAddDraft;
   vendorEditDraft?: WhatsAppVendorEditDraft;
   hasReceivedContactCard?: boolean;
+  hasSeenSaveTip?: boolean;
   pendingIntent?: {
     action: 'REGISTER_VENDOR' | 'CONNECT_VENDOR' | 'SEARCH' | 'GREETING';
     payload?: any;
@@ -107,6 +108,7 @@ export function getWhatsAppSession(phone: string): WhatsAppUserSessionState {
   if (!waSessions.has(clean)) {
     waSessions.set(clean, {
       state: 'IDLE',
+      hasSeenSaveTip: false,
       updatedAt: new Date().toISOString(),
     });
   }
@@ -130,8 +132,10 @@ export function updateWhatsAppSession(
 
 export function resetWhatsAppSession(phone: string): void {
   const clean = phone.replace(/\D/g, '');
+  const prev = waSessions.get(clean);
   waSessions.set(clean, {
     state: 'IDLE',
+    hasSeenSaveTip: prev?.hasSeenSaveTip ?? false,
     updatedAt: new Date().toISOString(),
   });
 }
