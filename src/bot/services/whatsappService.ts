@@ -519,16 +519,11 @@ export async function processMasterWhatsAppEngine(params: {
     }
 
     if (!text) {
+      const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
+      const prefix = name ? `Hello ${name}, ` : 'Hello, ';
       await sendWhatsAppMessage(
         senderPhone,
-        `🎙️ *Voice Note Received*\n\nWe couldn't clearly hear your voice note.\n\n💬 *Please type what you need in text* (e.g. \`Leather Slippers in Onitsha 15k\` or \`Solar Inverter in Alaba\`), and FLOATE will find verified shops for you!`,
-        {
-          quickReplies: [
-            { id: 'btn_find_product', title: '🔍 Find a Product' },
-            { id: 'btn_browse_markets', title: '📍 Browse Markets' },
-            { id: 'btn_for_businesses', title: '🏪 For Businesses' },
-          ],
-        }
+        `${prefix}we could not clearly hear your voice note. Please type what product, item, or service you are looking for.`
       );
       return;
     }
@@ -545,46 +540,29 @@ export async function processMasterWhatsAppEngine(params: {
     return;
   }
 
-  // 2. Conversational Intent & Pleasantries Interceptor (greetings, "how are you", compliments, identity)
+  // 2. Conversational Intent & Pleasantries Interceptor (greetings, "how are you", compliments, identity, support)
   const convIntent = getConversationalIntent(text, senderName);
   if (convIntent && convIntent.isConversational) {
     resetWhatsAppSession(senderPhone);
     await firestoreDb.resetUserSession(senderPhone);
 
     const alreadySeenTip = await firestoreDb.hasUserSeenSaveTip(senderPhone);
-    const name = senderName && senderName !== 'Customer' ? senderName : '';
-    const greeting = name ? `👋 Hello ${name} 😌` : `👋 Hello 😌`;
+    const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
+    const prefix = name ? `Hello ${name}, ` : 'Hello, ';
 
     if (!alreadySeenTip) {
-      // First-time contact greeting
-      const msg =
-        `${greeting}\n\n` +
-        `I'm here to help you find verified vendors, products, and services across Nigeria.\n\n` +
-        `💡 *Tip:* Save this number as *FLOATE* so you can easily search items and message verified sellers anytime!\n\n` +
-        `What would you like to shop for today?\n` +
-        `Choose an option below:`;
+      // First-time contact greeting with complete guidelines, support email, and save tip
+      const msg = `${prefix}welcome to Floate. You can find verified vendors and products across Nigeria by simply typing what you want (e.g. Leather Slippers in Onitsha or Solar Inverter in Alaba), registering your business, or asking for help. To report a business or contact support, email us at support@floate.xyz. Please save this number as Floate for quick access anytime.`;
 
       updateWhatsAppSession(senderPhone, { hasSeenSaveTip: true });
       await firestoreDb.markUserSeenSaveTip(senderPhone);
 
-      await sendWhatsAppMessage(senderPhone, msg, {
-        quickReplies: [
-          { id: 'btn_find_product', title: '🔍 Find a Product' },
-          { id: 'btn_browse_markets', title: '📍 Browse Markets' },
-          { id: 'btn_for_businesses', title: '🏪 For Businesses' },
-        ],
-      });
+      await sendWhatsAppMessage(senderPhone, msg);
       return;
     } else {
-      // Returning user conversational reply (natural, warm, asks how to help without tip)
-      const replyMsg = convIntent.replyText || `${greeting}\n\nWhat would you like to shop for today?\nChoose an option below:`;
-      await sendWhatsAppMessage(senderPhone, replyMsg, {
-        quickReplies: [
-          { id: 'btn_find_product', title: '🔍 Find a Product' },
-          { id: 'btn_browse_markets', title: '📍 Browse Markets' },
-          { id: 'btn_for_businesses', title: '🏪 For Businesses' },
-        ],
-      });
+      // Returning user conversational reply (straight line, no emojis, no paragraphs, no buttons)
+      const replyMsg = convIntent.replyText || `${prefix}what would you like to shop for today?`;
+      await sendWhatsAppMessage(senderPhone, replyMsg);
       return;
     }
   }
@@ -990,37 +968,23 @@ async function sendWelcomeGreeting(toPhone: string, senderName: string) {
   const session = getWhatsAppSession(toPhone);
   const alreadySeenTip = session.hasSeenSaveTip || (await firestoreDb.hasUserSeenSaveTip(toPhone));
 
-  const name = senderName && senderName !== 'Customer' ? senderName : '';
-  const greeting = name ? `👋 Hello ${name} 😌` : `👋 Hello 😌`;
+  const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
+  const prefix = name ? `Hello ${name}, ` : 'Hello, ';
 
   let msg = '';
   if (!alreadySeenTip) {
-    // First-time greeting for new numbers
-    msg =
-      `${greeting}\n\n` +
-      `I'm here to help you find verified vendors, products, and services across Nigeria.\n\n` +
-      `💡 *Tip:* Save this number as *FLOATE* so you can easily search items and message verified sellers anytime!\n\n` +
-      `What would you like to shop for today?\n` +
-      `Choose an option below:`;
+    // First-time greeting for new numbers with full guidelines, support email, and save tip
+    msg = `${prefix}welcome to Floate. You can find verified vendors and products across Nigeria by simply typing what you want (e.g. Leather Slippers in Onitsha or Solar Inverter in Alaba), registering your business, or asking for help. To report a business or contact support, email us at support@floate.xyz. Please save this number as Floate for quick access anytime.`;
 
     // Mark that this user has received the save tip
     updateWhatsAppSession(toPhone, { hasSeenSaveTip: true });
     await firestoreDb.markUserSeenSaveTip(toPhone);
   } else {
-    // Returning user greeting (Clean & uncluttered without tip)
-    msg =
-      `${greeting}\n\n` +
-      `What would you like to shop for today?\n` +
-      `Choose an option below:`;
+    // Returning user greeting (Clean & uncluttered straight line without emojis, paragraphs, or buttons)
+    msg = `${prefix}what would you like to shop for today?`;
   }
 
-  await sendWhatsAppMessage(toPhone, msg, {
-    quickReplies: [
-      { id: 'btn_find_product', title: '🔍 Find a Product' },
-      { id: 'btn_browse_markets', title: '📍 Browse Markets' },
-      { id: 'btn_for_businesses', title: '🏪 For Businesses' },
-    ],
-  });
+  await sendWhatsAppMessage(toPhone, msg);
 }
 
 /**
@@ -1039,14 +1003,10 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
 
   // Intercept any conversational fallback detected by AI
   if (parsed.isConversational) {
-    const reply = parsed.conversationalReply || `👋 Hello 😌\n\nWhat would you like to shop for today?\nChoose an option below:`;
-    await sendWhatsAppMessage(toPhone, reply, {
-      quickReplies: [
-        { id: 'btn_find_product', title: '🔍 Find a Product' },
-        { id: 'btn_browse_markets', title: '📍 Browse Markets' },
-        { id: 'btn_for_businesses', title: '🏪 For Businesses' },
-      ],
-    });
+    const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
+    const prefix = name ? `Hello ${name}, ` : 'Hello, ';
+    const reply = parsed.conversationalReply || `${prefix}what would you like to shop for today?`;
+    await sendWhatsAppMessage(toPhone, reply);
     return;
   }
 

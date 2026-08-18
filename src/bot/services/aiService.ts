@@ -64,63 +64,75 @@ export interface ParsedCommerceQuery {
 }
 
 /**
- * Fast deterministic conversational intent classifier for greetings, pleasantries, compliments, and identity questions.
+ * Fast deterministic conversational intent classifier for greetings, pleasantries, compliments, identity, and support questions.
  */
 export function getConversationalIntent(rawText: string, senderName?: string): { isConversational: boolean; replyText?: string } | null {
   const text = rawText.toLowerCase().trim();
   const clean = text.replace(/[^a-z0-9 _]+/g, '').replace(/\s+/g, ' ');
-  const name = senderName && senderName !== 'Customer' ? ` ${senderName}` : '';
+  const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
+  const prefix = name ? `Hello ${name}, ` : 'Hello, ';
 
-  // 1. "How are you" / "How are you doing" / "How is your day" / "How far"
+  // 1. Support / Report a business / Customer care inquiry
+  if (
+    /\b(support|customer care|customer service|help desk|contact support|contact us|report|report a business|report shop|report seller|report fraud|scam|fraud|complaint)\b/i.test(clean) ||
+    /^(support|help|report|customer care|complaint)$/i.test(clean)
+  ) {
+    return {
+      isConversational: true,
+      replyText: `${prefix}for customer support or to report a business, please email us directly at support@floate.xyz. How else can I assist you today?`,
+    };
+  }
+
+  // 2. "How are you" / "How are you doing" / "How is your day" / "How far"
   if (
     /^(hello|hi|hey)?\s*(floate\s*)?(how (are|r) (you|u)|how (are|r) (you|u) doing|how is your day|hows your day|how is everything|how body|how you dey|how things|hope (you are|youre|all is) (good|fine|well|great)|what'?s up|wassup)(\s*floate)?$/i.test(clean) ||
     /\b(how are you doing today|how are you today|how are you|how is your day going|hope your day is going well)\b/i.test(clean)
   ) {
     return {
       isConversational: true,
-      replyText: `👋 Hello${name}! 😌 I'm doing very well, thank you for asking!\n\nHow can I help you today? What would you like to shop for?`,
+      replyText: `${prefix}I am doing well, thank you. How can I help you today?`,
     };
   }
 
-  // 2. Compliments / Appreciation ("You're doing a nice job", "Well done", "Thank you")
+  // 3. Compliments / Appreciation ("You're doing a nice job", "Well done", "Thank you")
   if (
     /\b(you('?re| are) doing (a )?(nice|great|good|wonderful|amazing) job|nice job|great job|good job|well done|you are doing great|thank you so much|thank you|thanks a lot|appreciate your help|appreciate you)\b/i.test(clean) ||
     /^(thank you|thanks|thanks floate|thank you floate|well done|nice one|good job|great work)$/i.test(clean)
   ) {
     return {
       isConversational: true,
-      replyText: `Thank you so much${name}! 😌 Glad I could be of help.\n\nHow can I assist you with your shopping today?`,
+      replyText: `${prefix}thank you so much. What would you like to shop for today?`,
     };
   }
 
-  // 3. Identity & About ("Who are you", "What is Floate", "What do you do")
+  // 4. Identity & About ("Who are you", "What is Floate", "What do you do")
   if (
     /^(who (are|r) (you|u)|what is floate|what do you do|what can you do|how does (this|floate) work|introduce yourself)(\s+floate)?$/i.test(clean)
   ) {
     return {
       isConversational: true,
-      replyText: `I am Floate, your personal shopping assistant connecting you directly with verified Nigerian merchants across Lagos, Onitsha, Aba, Abuja, Kano, and nationwide! 😌\n\nWhat product, item, or service would you like to find today?`,
+      replyText: `${prefix}I am Floate, your shopping assistant connecting you with verified Nigerian merchants. What would you like to shop for today?`,
     };
   }
 
-  // 4. Pure Greetings ("Hello floate", "Hi", "Good morning", "Good afternoon", "Good evening")
+  // 5. Pure Greetings ("Hello floate", "Hi", "Good morning", "Good afternoon", "Good evening")
   if (
     /^(hello|hi|hey|good morning|good afternoon|good evening|good day|greetings|start)(\s+(floate|flote|there|ai|bot))?$/i.test(clean) ||
     /^(hello floate|hello_floate|hellofloate|hi floate|hi_floate|hifloate|good morning floate|good afternoon floate|good evening floate)$/i.test(clean)
   ) {
     return {
       isConversational: true,
-      replyText: `👋 Hello${name} 😌\n\nWhat would you like to shop for today?\nChoose an option below:`,
+      replyText: `${prefix}what would you like to shop for today?`,
     };
   }
 
-  // 5. Vague Shopping Statements ("I want to buy something", "Help me shop", "I want to buy")
+  // 6. Vague Shopping Statements ("I want to buy something", "Help me shop", "I want to buy")
   if (
     /^(i want to (buy|shop|get)|i need to (buy|shop|get)|help me (buy|shop|find)|what can i buy|show me (things|products|items)|i want to buy something|i want to shop)$/i.test(clean)
   ) {
     return {
       isConversational: true,
-      replyText: `I'd love to help you find that${name}! 😌\n\nWhat specific product, item, or service are you looking for? You can also mention your budget or city (e.g. \`Solar battery in Alaba\` or \`Men corporate shoes in Onitsha\`).`,
+      replyText: `${prefix}what specific product or service would you like to buy? You can also include your city or budget.`,
     };
   }
 
