@@ -67,6 +67,16 @@ export interface ConversationalIntentResult {
   isConversational: boolean;
   isReportRequest?: boolean;
   replyText?: string;
+  intent?: 'BRAND_QUESTION' | 'OFF_TOPIC' | 'SHOPPING_SEARCH' | 'REPORT_DISPUTE';
+}
+
+export interface QueryIntentClassification {
+  intent: 'SHOPPING_SEARCH' | 'BRAND_QUESTION' | 'OFF_TOPIC' | 'REPORT_DISPUTE';
+  conversationalReply?: string;
+  cleanKeywords?: string;
+  category?: string;
+  location?: string;
+  isRegistrationRequest?: boolean;
 }
 
 /**
@@ -86,6 +96,7 @@ export function getConversationalIntent(rawText: string, senderName?: string): C
     return {
       isConversational: true,
       isReportRequest: true,
+      intent: 'REPORT_DISPUTE',
       replyText: `${prefix}I am sorry to hear you are having an issue. Please tell me what happened, what the vendor did, and the vendor's name or phone number so we can look into it for you.`,
     };
   }
@@ -97,6 +108,7 @@ export function getConversationalIntent(rawText: string, senderName?: string): C
   ) {
     return {
       isConversational: true,
+      intent: 'BRAND_QUESTION',
       replyText: `${prefix}for general inquiries you can reach us at support@floate.xyz, or if you need to report a vendor or issue, please describe what happened so we can assist you.`,
     };
   }
@@ -108,6 +120,7 @@ export function getConversationalIntent(rawText: string, senderName?: string): C
   ) {
     return {
       isConversational: true,
+      intent: 'BRAND_QUESTION',
       replyText: `${prefix}I am doing well, thank you. How can I help you today?`,
     };
   }
@@ -119,17 +132,19 @@ export function getConversationalIntent(rawText: string, senderName?: string): C
   ) {
     return {
       isConversational: true,
+      intent: 'BRAND_QUESTION',
       replyText: `${prefix}thank you so much. What would you like to shop for today?`,
     };
   }
 
-  // 5. Identity & About ("Who are you", "What is Floate", "What do you do")
+  // 5. Identity & About ("Who are you", "What is Floate", "What do you do", "How does this work")
   if (
-    /^(who (are|r) (you|u)|what is floate|what do you do|what can you do|how does (this|floate) work|introduce yourself)(\s+floate)?$/i.test(clean)
+    /^(who (are|r) (you|u)|what is floate|what do you do|what can you do|how does (this|floate) work|introduce yourself|tell me about floate)(\s+floate)?$/i.test(clean)
   ) {
     return {
       isConversational: true,
-      replyText: `${prefix}I am Floate, your shopping assistant connecting you with verified Nigerian merchants. What would you like to shop for today?`,
+      intent: 'BRAND_QUESTION',
+      replyText: `${prefix}Floate is your intelligent Nigerian commerce platform connecting you directly with verified merchants, major open markets, and service professionals nationwide. What would you like to shop for today?`,
     };
   }
 
@@ -140,21 +155,100 @@ export function getConversationalIntent(rawText: string, senderName?: string): C
   ) {
     return {
       isConversational: true,
+      intent: 'BRAND_QUESTION',
       replyText: `${prefix}what would you like to shop for today?`,
     };
   }
 
-  // 7. Vague Shopping Statements ("I want to buy something", "Help me shop", "I want to buy")
+  // 7. Off-Topic Chit Chat Fallback Patterns (Jokes, weather, code, personal trivia)
   if (
-    /^(i want to (buy|shop|get)|i need to (buy|shop|get)|help me (buy|shop|find)|what can i buy|show me (things|products|items)|i want to buy something|i want to shop)$/i.test(clean)
+    /^(tell me a joke|write a poem|write code|who is the president|what is the weather|what time is it|sing a song|are you single|tell me about yourself)$/i.test(clean)
   ) {
     return {
       isConversational: true,
-      replyText: `${prefix}what specific product or service would you like to buy? You can also include your city or budget.`,
+      intent: 'OFF_TOPIC',
+      replyText: `${prefix}I am just here to help you find what you need on Floate. What are you shopping for today?`,
     };
   }
 
   return null;
+}
+
+/**
+ * Lightweight Gemini Intent Classification Layer:
+ * Evaluates whether a query is a genuine brand question, off-topic chit-chat, or shopping search.
+ */
+export async function classifyQueryIntentWithGemini(userQuery: string, senderName?: string): Promise<QueryIntentClassification> {
+  const norm = (userQuery || '').trim();
+  const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
+  const prefix = name ? `Hello ${name}, ` : 'Hello, ';
+
+  // Check deterministic rules first
+  const deterministic = getConversationalIntent(norm, senderName);
+  if (deterministic) {
+    if (deterministic.intent === 'REPORT_DISPUTE') {
+      return { intent: 'REPORT_DISPUTE', conversationalReply: deterministic.replyText };
+    }
+    if (deterministic.intent === 'BRAND_QUESTION') {
+      return { intent: 'BRAND_QUESTION', conversationalReply: deterministic.replyText };
+    }
+    if (deterministic.intent === 'OFF_TOPIC') {
+      return { intent: 'OFF_TOPIC', conversationalReply: deterministic.replyText };
+    }
+  }
+
+  const ai = getAIClient();
+  if (!ai) {
+    return { intent: 'SHOPPING_SEARCH', cleanKeywords: norm };
+  }
+
+  try {
+    const response = await generateContentWithFallback(ai, {
+      contents: `You are the intent classification and brand voice engine for Floate (African & Nigerian commerce platform).
+A user sent this message: "${norm}"
+
+Task: Classify this message into one of three intents:
+1. "BRAND_QUESTION": The user is asking about Floate, how Floate works, what businesses or markets are available, how vendor registration works, safety, contact/support, or how to buy/sell on Floate.
+   -> Provide "conversationalReply": A helpful, natural, accurate 1-line answer in standard Nigerian English. Strictly NO emojis, straight line answer with no paragraph breaks.
+2. "OFF_TOPIC": The user is asking something completely unrelated to shopping, commerce, products, services, or Floate (e.g. general chit-chat, jokes, unrelated personal questions, coding, trivia, politics).
+   -> Provide "conversationalReply": A polite, warm redirect back to shopping e.g. "${prefix}I am just here to help you find what you need on Floate. What are you shopping for today?" (NO emojis, straight line).
+3. "SHOPPING_SEARCH": The user is searching for a product, service, item, price, or vendor to buy or hire (e.g. "shoes in onitsha", "iphone 13", "video editor", "lawyer", "solar inverter", "where can i buy wigs").
+   -> "cleanKeywords": The clean product/service name without conversational fluff.
+
+Return strictly JSON:
+{
+  "intent": "BRAND_QUESTION" | "OFF_TOPIC" | "SHOPPING_SEARCH",
+  "conversationalReply": "string or null",
+  "cleanKeywords": "string or null",
+  "category": "string or null",
+  "location": "string or null"
+}`,
+    });
+
+    const text = response.text || '';
+    const cleanJson = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    const json = JSON.parse(cleanJson);
+
+    if (json.intent === 'BRAND_QUESTION' || json.intent === 'OFF_TOPIC') {
+      let reply = json.conversationalReply || `${prefix}what would you like to shop for today?`;
+      // Ensure no emojis and straight line
+      reply = reply.replace(/[\u{1F600}-\u{1F6FF}|\u{1F300}-\u{1F5FF}|\u{1F680}-\u{1F6FF}|\u{1F1E0}-\u{1F1FF}|\u{2600}-\u{26FF}|\u{2700}-\u{27BF}]/gu, '').replace(/\n+/g, ' ').trim();
+      return {
+        intent: json.intent,
+        conversationalReply: reply,
+      };
+    }
+
+    return {
+      intent: 'SHOPPING_SEARCH',
+      cleanKeywords: json.cleanKeywords || norm,
+      category: json.category || undefined,
+      location: json.location || undefined,
+    };
+  } catch (err) {
+    console.warn('[Gemini Intent Classifier Notice]:', err);
+    return { intent: 'SHOPPING_SEARCH', cleanKeywords: norm };
+  }
 }
 
 /**

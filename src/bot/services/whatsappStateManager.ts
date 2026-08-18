@@ -67,6 +67,9 @@ export interface WhatsAppSearchState {
 export interface WhatsAppUserSessionState {
   state:
     | 'IDLE'
+    | 'AWAITING_ROLE_SELECTION'
+    | 'AWAITING_PRIMARY_LOCATION'
+    | 'AWAITING_LOCATION_CHANGE'
     | 'AWAITING_SAVE_CONTACT'
     | 'QUALIFYING_VOLUME'
     | 'QUALIFYING_FULFILLMENT'

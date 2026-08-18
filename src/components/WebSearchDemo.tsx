@@ -1,5 +1,23 @@
-import React, { useState } from 'react';
-import { Search, Sparkles, ShoppingBag, MapPin, Tag, ExternalLink, ShieldCheck, Clock, Loader2, AlertCircle, ArrowRight, Trash2, Store, Bot, Layers, Send } from 'lucide-react';
+import React, { useState, useRef } from 'react';
+import {
+  Search,
+  Sparkles,
+  ShoppingBag,
+  MapPin,
+  Tag,
+  ExternalLink,
+  ShieldCheck,
+  Clock,
+  Loader2,
+  AlertCircle,
+  ArrowRight,
+  Store,
+  Bot,
+  ChevronLeft,
+  ChevronRight,
+  ListFilter,
+  PhoneCall,
+} from 'lucide-react';
 
 interface SearchResult {
   id: string;
@@ -13,6 +31,7 @@ interface SearchResult {
   identityVerified?: boolean;
   leadDeepLink: string;
   telegramDeepLink?: string;
+  whatsappDeepLink?: string;
   profileImageUrl?: string;
   productImages?: string[];
 }
@@ -25,24 +44,36 @@ export function WebSearchDemo() {
   const [searchTimeMs, setSearchTimeMs] = useState<number | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
+
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [spotlightListings, setSpotlightListings] = useState<SearchResult[]>([]);
+  const [organicListings, setOrganicListings] = useState<SearchResult[]>([]);
   const [exactMatches, setExactMatches] = useState<SearchResult[]>([]);
   const [categoryMatches, setCategoryMatches] = useState<SearchResult[]>([]);
   const [moreBusinessesDeepLink, setMoreBusinessesDeepLink] = useState<string | null>(null);
+  const [moreBusinessesWhatsAppDeepLink, setMoreBusinessesWhatsAppDeepLink] = useState<string | null>(null);
 
-  // Deletion state
-  const [deletingMerchant, setDeletingMerchant] = useState(false);
-  const [deleteMessage, setDeleteMessage] = useState<string | null>(null);
+  // Spotlight carousel pagination & scroll ref
+  const carouselRef = useRef<HTMLDivElement>(null);
+  const [showMoreList, setShowMoreList] = useState(false);
+
+  const scrollCarousel = (direction: 'left' | 'right') => {
+    if (!carouselRef.current) return;
+    const cardWidth = 300;
+    carouselRef.current.scrollBy({
+      left: direction === 'left' ? -cardWidth : cardWidth,
+      behavior: 'smooth',
+    });
+  };
 
   const handleSearch = async (overrideQuery?: string) => {
     const q = overrideQuery !== undefined ? overrideQuery : query;
     if (!q.trim()) return;
 
-    // Reset state before firing request - NEVER set results to empty without setting loading to true!
     setLoading(true);
     setError(null);
     setHasSearched(false);
+    setShowMoreList(false);
     const start = performance.now();
 
     try {
@@ -68,6 +99,8 @@ export function WebSearchDemo() {
       }
 
       setResults(data.results || []);
+      setSpotlightListings((data.spotlightListings || []).slice(0, 7));
+      setOrganicListings(data.organicListings || []);
       setExactMatches(data.exactMatches || []);
       setCategoryMatches(data.categoryMatches || []);
 
@@ -79,40 +112,21 @@ export function WebSearchDemo() {
         setMoreBusinessesDeepLink(`https://t.me/Floatebusinessbot?start=search_${cleanSlug}${locSlug}`);
       }
 
+      if (data.moreBusinessesWhatsAppDeepLink) {
+        setMoreBusinessesWhatsAppDeepLink(data.moreBusinessesWhatsAppDeepLink);
+      }
+
       setHasSearched(true);
     } catch (err: any) {
       setError(err?.message || 'Failed to fetch search results from server.');
       setResults([]);
+      setSpotlightListings([]);
+      setOrganicListings([]);
       setExactMatches([]);
       setCategoryMatches([]);
       setMoreBusinessesDeepLink(null);
     } finally {
-      // ONLY turn off loading after data is completely updated to prevent 'no match' flash!
       setLoading(false);
-    }
-  };
-
-  const handleDeleteMerchant2345 = async () => {
-    setDeletingMerchant(true);
-    setDeleteMessage(null);
-    try {
-      const res = await fetch('/api/admin/delete-merchant', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ merchantId: '2345' }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setDeleteMessage('✅ Merchant 2345 successfully removed from Google Sheets and Firestore database!');
-        // Refresh search if active
-        if (hasSearched) handleSearch();
-      } else {
-        setDeleteMessage(`⚠️ Delete failed: ${data.error}`);
-      }
-    } catch (err: any) {
-      setDeleteMessage(`⚠️ Delete error: ${err?.message}`);
-    } finally {
-      setDeletingMerchant(false);
     }
   };
 
@@ -123,14 +137,14 @@ export function WebSearchDemo() {
         <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           <div>
             <span className="text-[11px] font-mono bg-sky-900/60 text-sky-300 border border-sky-700/80 px-2.5 py-0.5 rounded-full font-semibold uppercase tracking-wider">
-              Website Integration
+              Spotlight Commerce
             </span>
             <h2 className="text-xl font-bold text-slate-100 mt-2 flex items-center gap-2">
               <Search className="w-5 h-5 text-sky-400" />
-              Floate.xyz Web Search API Engine
+              Floate.xyz Web Search Engine
             </h2>
             <p className="text-xs text-slate-300 mt-1 max-w-2xl">
-              Live relevance filtering, sub-second query latency, and smooth loading states without premature "no match" visual flashes.
+              Spotlight recommended businesses in a high-speed horizontal carousel with instant merchant connect actions.
             </p>
           </div>
 
@@ -150,38 +164,18 @@ export function WebSearchDemo() {
               href="https://t.me/Floatebusinessbot?start=register_business"
               target="_blank"
               rel="noopener noreferrer"
-              className="px-3.5 py-2.5 bg-sky-950/80 hover:bg-sky-900 border border-sky-800 text-sky-200 text-xs font-medium rounded-xl flex items-center gap-2 transition-all"
+              className="px-4 py-2.5 bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold rounded-xl flex items-center gap-2 transition-all shadow-md hover:shadow-sky-900/30 active:scale-95"
             >
-              <Bot className="w-4 h-4 text-sky-400" />
-              Telegram Bot
+              <Bot className="w-4 h-4" />
+              Register on Telegram
               <ExternalLink className="w-3.5 h-3.5 opacity-80" />
             </a>
-
-            <button
-              onClick={handleDeleteMerchant2345}
-              disabled={deletingMerchant}
-              className="px-3.5 py-2.5 bg-rose-950/80 hover:bg-rose-900 border border-rose-800 text-rose-200 text-xs font-medium rounded-xl flex items-center gap-2 transition-all"
-            >
-              {deletingMerchant ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-              Delete 2345
-            </button>
           </div>
         </div>
-
-        {deleteMessage && (
-          <div className="mt-3 p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl text-xs font-mono text-emerald-400">
-            {deleteMessage}
-          </div>
-        )}
       </div>
 
       {/* Interactive Search Bar */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
-        <div className="flex items-center gap-2 text-xs font-mono text-slate-400 uppercase tracking-wider">
-          <Sparkles className="w-4 h-4 text-sky-400" />
-          Test Web Search Query:
-        </div>
-
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-md space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
           <div className="md:col-span-6 relative">
             <input
@@ -189,10 +183,9 @@ export function WebSearchDemo() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-              placeholder="Search product or service (e.g., footwear, video editor, lawyer)..."
-              className="w-full bg-slate-950 border border-slate-800 focus:border-sky-500 text-slate-100 text-sm rounded-xl pl-10 pr-4 py-3 outline-none"
+              placeholder="What are you shopping for? (e.g., footwear, video editor, laptop)"
+              className="w-full bg-slate-950 border border-slate-800 focus:border-sky-500 text-slate-100 text-sm rounded-xl px-4 py-3 outline-none transition-colors"
             />
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
           </div>
 
           <div className="md:col-span-3">
@@ -202,7 +195,7 @@ export function WebSearchDemo() {
               onChange={(e) => setLocation(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
               placeholder="Location (e.g., Onitsha)"
-              className="w-full bg-slate-950 border border-slate-800 focus:border-sky-500 text-slate-100 text-sm rounded-xl px-3.5 py-3 outline-none"
+              className="w-full bg-slate-950 border border-slate-800 focus:border-sky-500 text-slate-100 text-sm rounded-xl px-3.5 py-3 outline-none transition-colors"
             />
           </div>
 
@@ -210,7 +203,7 @@ export function WebSearchDemo() {
             <button
               onClick={() => handleSearch()}
               disabled={loading || !query.trim()}
-              className="w-full bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-semibold text-sm rounded-xl py-3 px-4 transition-all flex items-center justify-center gap-2 shadow-md"
+              className="w-full bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-semibold text-sm rounded-xl py-3 px-4 transition-all flex items-center justify-center gap-2 shadow-md active:scale-95"
             >
               {loading ? (
                 <>
@@ -258,7 +251,7 @@ export function WebSearchDemo() {
         {hasSearched && !loading && (
           <div className="flex items-center justify-between text-xs text-slate-400 px-1 font-mono">
             <span>
-              Found <strong className="text-slate-100">{results.length}</strong> relevant business match(es)
+              Found <strong className="text-slate-100">{results.length}</strong> matching verified business(es)
             </span>
             {searchTimeMs !== null && (
               <span className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 px-2.5 py-1 rounded-lg text-emerald-400">
@@ -269,20 +262,20 @@ export function WebSearchDemo() {
           </div>
         )}
 
-        {/* 1. Loading State Shimmer (Prevents "no match" flash!) */}
+        {/* 1. Loading State Shimmer */}
         {loading && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
             <div className="flex items-center gap-3 text-sky-400 text-xs font-mono">
               <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
-              Executing relevance matching and location filtering on server...
+              Retrieving Spotlight recommendations and matching listings...
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {[1, 2].map((i) => (
-                <div key={i} className="bg-slate-950 border border-slate-800/80 rounded-xl p-4 space-y-3 animate-pulse">
+            <div className="flex gap-4 overflow-hidden">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="min-w-[280px] bg-slate-950 border border-slate-800/80 rounded-2xl p-4 space-y-3 animate-pulse">
+                  <div className="h-36 bg-slate-800 rounded-xl"></div>
                   <div className="h-4 bg-slate-800 rounded w-2/3"></div>
                   <div className="h-3 bg-slate-800/60 rounded w-1/2"></div>
-                  <div className="h-3 bg-slate-800/40 rounded w-1/3"></div>
-                  <div className="h-8 bg-sky-950/40 border border-sky-900/30 rounded-lg w-full mt-2"></div>
+                  <div className="h-9 bg-emerald-950/40 border border-emerald-900/30 rounded-xl w-full mt-2"></div>
                 </div>
               ))}
             </div>
@@ -297,7 +290,7 @@ export function WebSearchDemo() {
           </div>
         )}
 
-        {/* 3. True "No Match" State (ONLY shown when loading is false AND results array is truly empty) */}
+        {/* 3. True "No Match" State */}
         {!loading && hasSearched && results.length === 0 && !error && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center space-y-3">
             <div className="w-12 h-12 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center mx-auto text-slate-400">
@@ -310,165 +303,281 @@ export function WebSearchDemo() {
           </div>
         )}
 
-        {/* 4. Results Display List (Limited to prevent UI clutter) */}
-        {!loading && results.length > 0 && (
+        {/* 4. Results Section: SPOTLIGHT HORIZONTAL CAROUSEL + EXPANDABLE MORE LIST */}
+        {!loading && (results.length > 0 || spotlightListings.length > 0) && (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-slate-300">
-                Top Recommended Verified Businesses ({Math.min(results.length, 4)} of {results.length} shown)
-              </span>
-              {moreBusinessesDeepLink && (
-                <a
-                  href={moreBusinessesDeepLink}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs font-medium text-sky-400 hover:text-sky-300 flex items-center gap-1 transition-colors"
+            {/* SPOTLIGHT HORIZONTAL CAROUSEL */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-xl space-y-4 relative overflow-hidden">
+              {/* Carousel Top Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800/80">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400">
+                    <Sparkles className="w-4 h-4 fill-amber-400 text-amber-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                      Spotlight Recommended Businesses
+                      <span className="text-[10px] font-mono font-semibold bg-amber-950/80 text-amber-300 border border-amber-800 px-2 py-0.5 rounded-full">
+                        7 Featured Slides
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      Verified top-tier Nigerian merchants for "{query}"
+                    </p>
+                  </div>
+                </div>
+
+                {/* Left / Right Carousel Controls */}
+                <div className="flex items-center gap-2 self-end sm:self-auto">
+                  <button
+                    onClick={() => scrollCarousel('left')}
+                    aria-label="Previous Slide"
+                    className="w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center justify-center border border-slate-700 transition-colors active:scale-95"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => scrollCarousel('right')}
+                    aria-label="Next Slide"
+                    className="w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center justify-center border border-slate-700 transition-colors active:scale-95"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Horizontal Scroll Rail (7 Slides Each) */}
+              <div
+                ref={carouselRef}
+                className="flex items-stretch gap-4 overflow-x-auto pb-3 pt-1 scroll-smooth snap-x snap-mandatory no-scrollbar"
+                style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+              >
+                {(spotlightListings.length > 0 ? spotlightListings : results.slice(0, 7)).map((biz, idx) => {
+                  const fallbackPhoto = 'https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600&auto=format&fit=crop&q=80';
+                  const displayImage =
+                    (biz.productImages && biz.productImages[0]) || biz.profileImageUrl || fallbackPhoto;
+
+                  const connectUrl =
+                    biz.whatsappDeepLink ||
+                    `https://wa.me/2348000000000?text=CONNECT_VENDOR_${encodeURIComponent(biz.id)}`;
+
+                  return (
+                    <div
+                      key={biz.id || idx}
+                      className="min-w-[270px] sm:min-w-[290px] max-w-[290px] bg-slate-950 hover:border-amber-500/50 border border-slate-800 rounded-2xl p-4 flex flex-col justify-between transition-all duration-200 shadow-md group shrink-0 snap-start relative"
+                    >
+                      {/* Image Container */}
+                      <div className="relative rounded-xl overflow-hidden bg-slate-900 border border-slate-800 h-36 mb-3">
+                        <img
+                          src={displayImage}
+                          alt={biz.product || biz.businessName}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                          referrerPolicy="no-referrer"
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).src = fallbackPhoto;
+                          }}
+                        />
+                        <div className="absolute top-2 left-2">
+                          <span className="text-[10px] font-mono font-bold bg-amber-950/90 text-amber-300 border border-amber-700/80 px-2 py-0.5 rounded-full flex items-center gap-1 shadow-sm backdrop-blur-sm">
+                            <Sparkles className="w-2.5 h-2.5 fill-amber-400 text-amber-400" />
+                            Spotlight
+                          </span>
+                        </div>
+                        <div className="absolute bottom-2 right-2">
+                          <span className="text-xs font-mono font-bold text-slate-100 bg-slate-950/90 border border-slate-700/80 px-2.5 py-0.5 rounded-lg shadow-sm backdrop-blur-sm">
+                            {biz.price}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Content Info */}
+                      <div className="space-y-2 flex-1">
+                        <div>
+                          <div className="flex items-center justify-between gap-1">
+                            <h4 className="font-bold text-slate-100 text-sm truncate group-hover:text-amber-300 transition-colors">
+                              {biz.businessName}
+                            </h4>
+                            {biz.isVerified && (
+                              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                            )}
+                          </div>
+                          <p className="text-xs font-semibold text-sky-400 truncate mt-0.5">
+                            {biz.product}
+                          </p>
+                        </div>
+
+                        <div className="text-[11px] text-slate-400 space-y-1 pt-1.5 border-t border-slate-900">
+                          <div className="flex items-center gap-1.5 truncate">
+                            <MapPin className="w-3 h-3 text-slate-500 shrink-0" />
+                            <span className="truncate">{biz.location}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 truncate">
+                            <Tag className="w-3 h-3 text-slate-500 shrink-0" />
+                            <span className="truncate">{biz.category}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Connect Button Under Card */}
+                      <div className="mt-4 pt-3 border-t border-slate-800/80">
+                        <a
+                          href={connectUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-all shadow-md active:scale-95"
+                        >
+                          <PhoneCall className="w-3.5 h-3.5" />
+                          <span>Connect</span>
+                          <ExternalLink className="w-3 h-3 opacity-80" />
+                        </a>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* SIMPLE LINE PROMPT & MORE LIST TRIGGER BELOW THE CAROUSEL */}
+              <div className="pt-3 border-t border-slate-800/80 flex flex-col sm:flex-row items-center justify-between gap-4 text-center sm:text-left">
+                <p className="text-xs text-slate-300 leading-relaxed max-w-xl">
+                  These are our best recommended businesses for your search. In case you want to see more businesses, let us know.
+                </p>
+
+                <button
+                  onClick={() => setShowMoreList(!showMoreList)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-sky-400 hover:text-sky-300 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all shrink-0 active:scale-95"
                 >
-                  <Bot className="w-3.5 h-3.5" />
-                  View All in Telegram
-                  <ExternalLink className="w-3 h-3" />
-                </a>
-              )}
+                  <ListFilter className="w-3.5 h-3.5" />
+                  <span>{showMoreList ? 'Hide Additional List' : 'View More Businesses'}</span>
+                  <ArrowRight className={`w-3.5 h-3.5 transition-transform ${showMoreList ? 'rotate-90' : ''}`} />
+                </button>
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {results.slice(0, 4).map((biz) => {
-                const deepLinkUrl = biz.telegramDeepLink || biz.leadDeepLink || 'https://t.me/Floatebusinessbot';
-                return (
-                  <div
-                    key={biz.id}
-                    className="bg-slate-900 hover:border-sky-700/80 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between transition-all shadow-md group"
-                  >
-                    <div className="space-y-3">
-                      {/* Header with Profile Image and Badges */}
-                      <div className="flex items-start gap-3">
-                        {biz.profileImageUrl ? (
-                          <img
-                            src={biz.profileImageUrl}
-                            alt={biz.businessName}
-                            className="w-12 h-12 rounded-xl object-cover border border-slate-700 shrink-0 bg-slate-800"
-                            referrerPolicy="no-referrer"
-                          />
-                        ) : (
-                          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-sky-900 to-indigo-900 border border-sky-700 flex items-center justify-center text-sky-200 font-bold text-base shrink-0">
-                            {biz.businessName.charAt(0).toUpperCase()}
-                          </div>
-                        )}
+            {/* EXPANDED ORGANIC LISTINGS (Shown when user wants more list) */}
+            {showMoreList && (
+              <div className="bg-slate-900/60 border border-slate-800 rounded-3xl p-6 space-y-5 animate-in fade-in duration-200">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-200 flex items-center gap-2">
+                    <ListFilter className="w-4 h-4 text-sky-400" />
+                    Additional Verified Business Matches ({results.length} total)
+                  </span>
+                </div>
 
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-start justify-between gap-2">
-                            <h3 className="font-bold text-slate-100 text-sm group-hover:text-sky-300 transition-colors truncate">
-                              {biz.businessName}
-                            </h3>
-                            <span className="text-xs font-mono font-bold text-sky-400 bg-sky-950/80 border border-sky-800 px-2 py-0.5 rounded-lg shrink-0">
-                              {biz.price}
-                            </span>
-                          </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {results.map((biz) => {
+                    const deepLinkUrl = biz.telegramDeepLink || biz.leadDeepLink || 'https://t.me/Floatebusinessbot';
+                    const waUrl =
+                      biz.whatsappDeepLink ||
+                      `https://wa.me/2348000000000?text=CONNECT_VENDOR_${encodeURIComponent(biz.id)}`;
 
-                          <div className="flex flex-wrap items-center gap-1.5 mt-1">
-                            {biz.isHighlyRecommended && (
-                              <span className="text-[10px] font-mono bg-amber-950/90 text-amber-300 border border-amber-700/80 px-1.5 py-0.5 rounded font-semibold flex items-center gap-0.5 shadow-sm">
-                                <Sparkles className="w-3 h-3 text-amber-400 fill-amber-400" />
-                                Top Rated Vendor
-                              </span>
-                            )}
-                            {biz.identityVerified && (
-                              <span className="text-[10px] font-mono bg-emerald-950 text-emerald-300 border border-emerald-800/80 px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5">
-                                <ShieldCheck className="w-3 h-3 text-emerald-400" />
-                                Identity Verified
-                              </span>
-                            )}
-                            {biz.isVerified && !biz.identityVerified && (
-                              <span className="text-[10px] font-mono bg-emerald-950 text-emerald-300 border border-emerald-800/80 px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5">
-                                <ShieldCheck className="w-3 h-3 text-emerald-400" />
-                                Verified
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="text-xs text-slate-300 space-y-1 pt-1 border-t border-slate-800/60">
-                        <div className="flex items-center gap-1.5 text-slate-300 font-medium">
-                          <ShoppingBag className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                          Product / Item: <span className="text-slate-100 font-semibold">{biz.product}</span>
-                        </div>
-                        <div className="flex items-center gap-1.5 text-slate-400">
-                          <Tag className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                          Category: {biz.category}
-                        </div>
-                        <div className="flex items-center gap-1.5 text-slate-400">
-                          <MapPin className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                          Location: {biz.location}
-                        </div>
-                      </div>
-
-                      {/* Product Photos Gallery Preview */}
-                      {biz.productImages && biz.productImages.length > 0 && (
-                        <div className="space-y-1 pt-1">
-                          <span className="text-[11px] font-mono text-slate-400">Product Photos:</span>
-                          <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                            {biz.productImages.map((imgUrl, idx) => (
+                    return (
+                      <div
+                        key={biz.id}
+                        className="bg-slate-950 hover:border-slate-700 border border-slate-800/90 rounded-2xl p-5 flex flex-col justify-between transition-all shadow-md group"
+                      >
+                        <div className="space-y-3">
+                          <div className="flex items-start gap-3">
+                            {biz.profileImageUrl ? (
                               <img
-                                key={idx}
-                                src={imgUrl}
-                                alt={`${biz.product} photo ${idx + 1}`}
-                                className="w-14 h-14 rounded-lg object-cover border border-slate-700 bg-slate-800 shrink-0"
+                                src={biz.profileImageUrl}
+                                alt={biz.businessName}
+                                className="w-12 h-12 rounded-xl object-cover border border-slate-700 shrink-0 bg-slate-800"
                                 referrerPolicy="no-referrer"
                               />
-                            ))}
+                            ) : (
+                              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-sky-900 to-indigo-900 border border-sky-700 flex items-center justify-center text-sky-200 font-bold text-base shrink-0">
+                                {biz.businessName.charAt(0).toUpperCase()}
+                              </div>
+                            )}
+
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-start justify-between gap-2">
+                                <h4 className="font-bold text-slate-100 text-sm truncate group-hover:text-sky-300 transition-colors">
+                                  {biz.businessName}
+                                </h4>
+                                <span className="text-xs font-mono font-bold text-sky-400 bg-sky-950/80 border border-sky-800 px-2 py-0.5 rounded-lg shrink-0">
+                                  {biz.price}
+                                </span>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                                {biz.isHighlyRecommended && (
+                                  <span className="text-[10px] font-mono bg-amber-950/90 text-amber-300 border border-amber-700/80 px-1.5 py-0.5 rounded font-semibold flex items-center gap-0.5">
+                                    <Sparkles className="w-3 h-3 text-amber-400 fill-amber-400" />
+                                    Top Rated
+                                  </span>
+                                )}
+                                {biz.isVerified && (
+                                  <span className="text-[10px] font-mono bg-emerald-950 text-emerald-300 border border-emerald-800/80 px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5">
+                                    <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                                    Verified
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="text-xs text-slate-300 space-y-1 pt-1 border-t border-slate-900">
+                            <div className="flex items-center gap-1.5 text-slate-300">
+                              <ShoppingBag className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                              Product / Item: <span className="text-slate-100 font-semibold">{biz.product}</span>
+                            </div>
+                            <div className="flex items-center gap-1.5 text-slate-400">
+                              <MapPin className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                              Location: {biz.location}
+                            </div>
                           </div>
                         </div>
-                      )}
-                    </div>
 
-                    {/* Lead Qualification Deep Links (WhatsApp + Telegram) */}
-                    <div className="mt-4 pt-3 border-t border-slate-800/80 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <a
-                        href={biz.whatsappDeepLink || `https://wa.me/2348000000000?text=CONNECT_VENDOR_${encodeURIComponent(biz.id)}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="w-full py-2 px-3 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/40 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all"
-                      >
-                        <ShoppingBag className="w-3.5 h-3.5" />
-                        Chat on WhatsApp
-                        <ExternalLink className="w-3 h-3 opacity-80" />
-                      </a>
+                        {/* Direct Connect Buttons */}
+                        <div className="mt-4 pt-3 border-t border-slate-900 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <a
+                            href={waUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="w-full py-2 px-3 bg-emerald-600/20 hover:bg-emerald-600 text-emerald-300 hover:text-white border border-emerald-500/40 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all"
+                          >
+                            <ShoppingBag className="w-3.5 h-3.5" />
+                            WhatsApp Connect
+                            <ExternalLink className="w-3 h-3 opacity-80" />
+                          </a>
 
-                      <a
-                        href={deepLinkUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="w-full py-2 px-3 bg-sky-600/20 hover:bg-sky-600 text-sky-300 hover:text-white border border-sky-500/40 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all"
-                      >
-                        <Bot className="w-3.5 h-3.5 text-sky-400" />
-                        Telegram
-                        <ExternalLink className="w-3 h-3 opacity-80" />
-                      </a>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                          <a
+                            href={deepLinkUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="w-full py-2 px-3 bg-sky-600/20 hover:bg-sky-600 text-sky-300 hover:text-white border border-sky-500/40 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all"
+                          >
+                            <Bot className="w-3.5 h-3.5 text-sky-400" />
+                            Telegram Connect
+                            <ExternalLink className="w-3 h-3 opacity-80" />
+                          </a>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
-            {/* MORE BUSINESSES CALL TO ACTION (Deep links to WhatsApp & Telegram Bot with search query context) */}
+            {/* Nationwide Network Deep Links */}
             <div className="bg-gradient-to-r from-sky-950/80 via-slate-900 to-indigo-950/80 border-2 border-sky-600/50 rounded-2xl p-6 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-5 text-center sm:text-left">
               <div className="space-y-1.5 max-w-xl">
                 <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-bold tracking-wide uppercase font-mono">
                   <Sparkles className="w-3.5 h-3.5" />
-                  Explore Verified Catalog
+                  Explore Full Network
                 </div>
                 <h4 className="text-base font-bold text-slate-100">
-                  Looking for more options or specialized vendors?
+                  Search across all Nigerian open markets & verified stores
                 </h4>
                 <p className="text-xs text-slate-300 leading-relaxed">
-                  Connect on WhatsApp or Telegram to search the full nationwide network for <strong className="text-sky-300">"{query}"</strong> with direct merchant price quotes and waybill verification.
+                  Chat with Floate on WhatsApp or Telegram to search the full nationwide network for <strong className="text-sky-300">"{query}"</strong> with direct merchant quotes and waybill verification.
                 </p>
               </div>
 
               <div className="flex flex-col sm:flex-row items-center gap-2.5 w-full sm:w-auto shrink-0">
                 <a
-                  href={`https://wa.me/2348000000000?text=SEARCH_${encodeURIComponent(query.toLowerCase().replace(/[^a-z0-9]+/g, '_'))}`}
+                  href={moreBusinessesWhatsAppDeepLink || `https://wa.me/2348000000000?text=SEARCH_${encodeURIComponent(query.toLowerCase().replace(/[^a-z0-9]+/g, '_'))}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="w-full sm:w-auto px-5 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-lg hover:shadow-emerald-900/30 flex items-center justify-center gap-2 transition-all active:scale-95"

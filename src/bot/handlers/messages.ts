@@ -1050,12 +1050,16 @@ async function handleBuyerSearch(ctx: Context, userId: number, username: string,
     const cleanProduct = parsed.searchKeywords || text;
     const cleanProductEscaped = escapeMarkdownText(cleanProduct);
 
+    // Fetch or create persistent buyer account
+    const buyer = await firestoreDb.getOrCreateBuyerAccount(userId, 'telegram', username);
+    const searchLocation = parsed.targetSellerLocation || buyer.primaryLocation || undefined;
+
     // Execute structured search against live Google Sheets
     let searchResults;
     try {
       searchResults = await sheetsDb.searchBusinessListings(
         cleanProduct,
-        parsed.targetSellerLocation,
+        searchLocation,
         parsed.category,
         parsed.maxPriceNaira,
         parsed.inferredCategories
@@ -1064,6 +1068,14 @@ async function handleBuyerSearch(ctx: Context, userId: number, username: string,
       console.error('[Buyer Search Error] sheetsDb.searchBusinessListings error:', searchErr?.message || searchErr);
       searchResults = { exactMatches: [], categoryMatches: [], allMatches: [], source: 'local' as const };
     }
+
+    // Record buyer search in persistent history
+    await firestoreDb.recordBuyerSearch(
+      userId,
+      cleanProduct,
+      searchLocation,
+      searchResults.exactMatches.length + searchResults.categoryMatches.length
+    );
 
     console.log(`[Buyer Search] Matches found - Exact: ${searchResults.exactMatches.length}, Category: ${searchResults.categoryMatches.length}`);
 

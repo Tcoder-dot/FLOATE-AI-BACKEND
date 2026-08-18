@@ -644,6 +644,37 @@ export function setupCommandHandlers(bot: any) {
     await showMyStatsFlow(ctx, userId);
   });
 
+  // /location command for buyer primary location
+  bot.command(['location', 'setlocation', 'changelocation', 'mylocation'], async (ctx: Context) => {
+    const userId = ctx.from?.id || 0;
+    const username = ctx.from?.first_name || 'User';
+    statsManager.recordUpdate(userId);
+
+    const matchParam = typeof ctx.match === 'string' ? ctx.match.trim() : '';
+    if (matchParam) {
+      await firestoreDb.updateBuyerPrimaryLocation(userId, matchParam);
+      await replySafe(
+        ctx,
+        `📍 *Primary Location Updated!*\n\n` +
+        `Your default shopping location is now set to *${escapeMarkdownText(matchParam)}*.\n` +
+        `Floate will prioritize verified businesses near you for future searches.`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    const buyer = await firestoreDb.getOrCreateBuyerAccount(userId, 'telegram', username);
+    const currentLoc = buyer.primaryLocation ? `*${escapeMarkdownText(buyer.primaryLocation)}*` : '_Not set yet_';
+
+    await replySafe(
+      ctx,
+      `📍 *Your Default Shopping Location:* ${currentLoc}\n\n` +
+      `To update your location, type:\n\`/location [Your City or Area]\`\n\n` +
+      `_(Example: \`/location Onitsha\` or \`/location Ikeja, Lagos\`)_`,
+      { parse_mode: 'Markdown' }
+    );
+  });
+
   // /role command to switch or view roles
   bot.command('role', async (ctx: Context) => {
     const userId = ctx.from?.id || 0;

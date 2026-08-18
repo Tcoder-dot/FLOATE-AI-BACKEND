@@ -223,6 +223,24 @@ export interface TransactionDoc {
   timestamp: string;
 }
 
+export interface BuyerSearchHistoryItem {
+  query: string;
+  locationUsed?: string;
+  matchedCount?: number;
+  timestamp: string;
+}
+
+export interface BuyerAccountDoc {
+  buyerId: string; // Telegram ID or WhatsApp Phone
+  channel: 'whatsapp' | 'telegram' | 'web';
+  name: string;
+  primaryLocation?: string; // e.g. "Onitsha", "Ikeja, Lagos", "Port Harcourt"
+  searchHistory: BuyerSearchHistoryItem[];
+  negotiatorAccess?: boolean; // Future-proof foreign key for AI negotiator
+  createdAt: string;
+  lastActiveAt: string;
+}
+
 export class FirestoreService {
   public static readonly MONETIZATION_ENABLED = false; // Set to true to re-enable credit deductions & wallet checks
   private defaultInitialCredits = 1000; // 1,000 NGN bonus = 5 initial leads
@@ -1700,6 +1718,151 @@ export class FirestoreService {
     } catch (err) {
       console.error('[Firestore] Error saving WhatsApp lead:', err);
       return null;
+    }
+  }
+
+  /**
+   * Get or create a persistent BuyerAccountDoc in Firestore
+   */
+  public async getOrCreateBuyerAccount(
+    buyerId: string | number,
+    channel: 'whatsapp' | 'telegram' | 'web',
+    name?: string
+  ): Promise<BuyerAccountDoc> {
+    const cleanId = String(buyerId).trim();
+    try {
+      const buyerRef = doc(db, 'buyers', cleanId);
+      const snap = await getDoc(buyerRef);
+      const now = new Date().toISOString();
+
+      if (snap.exists()) {
+        const data = snap.data() as BuyerAccountDoc;
+        const updatedName = (name && name !== 'Customer') ? name : data.name || 'Customer';
+        await updateDoc(buyerRef, this.sanitizeForFirestore({
+          lastActiveAt: now,
+          name: updatedName,
+        }));
+        return {
+          ...data,
+          lastActiveAt: now,
+          name: updatedName,
+        };
+      }
+
+      const newBuyer: BuyerAccountDoc = {
+        buyerId: cleanId,
+        channel,
+        name: (name && name !== 'Customer') ? name : 'Customer',
+        searchHistory: [],
+        negotiatorAccess: false,
+        createdAt: now,
+        lastActiveAt: now,
+      };
+
+      await setDoc(buyerRef, this.sanitizeForFirestore(newBuyer));
+      return newBuyer;
+    } catch (err) {
+      console.warn(`[Firestore] Notice fetching/creating buyer account for ${cleanId}:`, err);
+      return {
+        buyerId: cleanId,
+        channel,
+        name: name || 'Customer',
+        searchHistory: [],
+        negotiatorAccess: false,
+        createdAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  /**
+   * Get existing buyer account by ID
+   */
+  public async getBuyerAccount(buyerId: string | number): Promise<BuyerAccountDoc | null> {
+    const cleanId = String(buyerId).trim();
+    try {
+      const buyerRef = doc(db, 'buyers', cleanId);
+      const snap = await getDoc(buyerRef);
+      if (snap.exists()) {
+        return snap.data() as BuyerAccountDoc;
+      }
+      return null;
+    } catch (err) {
+      console.warn(`[Firestore] Error getting buyer account ${cleanId}:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * Update buyer's primary location
+   */
+  public async updateBuyerPrimaryLocation(buyerId: string | number, location: string): Promise<boolean> {
+    const cleanId = String(buyerId).trim();
+    const cleanLoc = location.trim();
+    try {
+      const buyerRef = doc(db, 'buyers', cleanId);
+      const snap = await getDoc(buyerRef);
+      const now = new Date().toISOString();
+
+      if (snap.exists()) {
+        await updateDoc(buyerRef, this.sanitizeForFirestore({
+          primaryLocation: cleanLoc,
+          lastActiveAt: now,
+        }));
+      } else {
+        const newBuyer: BuyerAccountDoc = {
+          buyerId: cleanId,
+          channel: 'whatsapp',
+          name: 'Customer',
+          primaryLocation: cleanLoc,
+          searchHistory: [],
+          negotiatorAccess: false,
+          createdAt: now,
+          lastActiveAt: now,
+        };
+        await setDoc(buyerRef, this.sanitizeForFirestore(newBuyer));
+      }
+      return true;
+    } catch (err) {
+      console.error(`[Firestore] Error updating primary location for buyer ${cleanId}:`, err);
+      return false;
+    }
+  }
+
+  /**
+   * Record search in buyer's search history
+   */
+  public async recordBuyerSearch(
+    buyerId: string | number,
+    queryText: string,
+    locationUsed?: string,
+    matchedCount?: number
+  ): Promise<void> {
+    const cleanId = String(buyerId).trim();
+    if (!queryText) return;
+    try {
+      const buyerRef = doc(db, 'buyers', cleanId);
+      const snap = await getDoc(buyerRef);
+      const now = new Date().toISOString();
+
+      const item: BuyerSearchHistoryItem = {
+        query: queryText.trim(),
+        locationUsed: locationUsed || undefined,
+        matchedCount: matchedCount ?? 0,
+        timestamp: now,
+      };
+
+      if (snap.exists()) {
+        const current = snap.data() as BuyerAccountDoc;
+        const history = Array.isArray(current.searchHistory) ? current.searchHistory : [];
+        const updatedHistory = [item, ...history.slice(0, 29)]; // keep latest 30 searches
+        await updateDoc(buyerRef, this.sanitizeForFirestore({
+          searchHistory: updatedHistory,
+          lastActiveAt: now,
+        }));
+      }
+    } catch (err) {
+      console.warn(`[Firestore] Notice recording search history for buyer ${cleanId}:`, err);
     }
   }
 }

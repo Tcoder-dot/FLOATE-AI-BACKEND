@@ -31,6 +31,8 @@ export interface SearchExecutionResponse {
   parsed: ParsedCommerceQuery;
   exactMatches: MatchedVendorResult[];
   categoryMatches: MatchedVendorResult[];
+  spotlightListings: MatchedVendorResult[];
+  organicListings: MatchedVendorResult[];
   results: MatchedVendorResult[];
   outOfAreaRecommendations?: MatchedVendorResult[];
   totalMatches: number;
@@ -162,6 +164,8 @@ export async function executeSearch(input: SearchInput): Promise<SearchExecution
       parsed: { searchKeywords: '', isRegistrationRequest: false },
       exactMatches: [],
       categoryMatches: [],
+      spotlightListings: [],
+      organicListings: [],
       results: [],
       totalMatches: 0,
       moreBusinessesDeepLink: generateMoreBusinessesDeepLink(''),
@@ -219,6 +223,32 @@ export async function executeSearch(input: SearchInput): Promise<SearchExecution
     }
   }
 
+  // 4. Partition into Spotlight (Priority / Recommended) and Organic listings
+  const spotlightListings: MatchedVendorResult[] = [];
+  const spotlightIds = new Set<string>();
+
+  // A. Matched spotlight listings first
+  for (const item of combinedResults) {
+    if (item.isHighlyRecommended && !spotlightIds.has(item.id)) {
+      spotlightIds.add(item.id);
+      spotlightListings.push(item);
+    }
+  }
+
+  // B. Supplement with verified spotlight seed listings so the carousel always has up to 7 slides
+  if (spotlightListings.length < 7) {
+    const allListings = sheetsDb.getAllListings();
+    for (const b of allListings) {
+      if (spotlightListings.length >= 7) break;
+      if ((isSpotlightBusiness(b.businessName) || b.isHighlyRecommended) && !spotlightIds.has(b.id)) {
+        spotlightIds.add(b.id);
+        spotlightListings.push(formatResultItem(b));
+      }
+    }
+  }
+
+  const organicListings = combinedResults.filter((r) => !r.isHighlyRecommended);
+
   const moreBusinessesDeepLink = generateMoreBusinessesDeepLink(rawQuery, input.location || parsed.targetSellerLocation);
   const cleanBotWaPhone = (process.env.WHATSAPP_PHONE_NUMBER || '2348000000000').replace(/\D/g, '');
   const moreBusinessesWhatsAppDeepLink = `https://wa.me/${cleanBotWaPhone}?text=SEARCH_${encodeURIComponent(rawQuery.toLowerCase().replace(/[^a-z0-9]+/g, '_'))}`;
@@ -228,6 +258,8 @@ export async function executeSearch(input: SearchInput): Promise<SearchExecution
     parsed,
     exactMatches,
     categoryMatches,
+    spotlightListings,
+    organicListings,
     results: combinedResults,
     outOfAreaRecommendations,
     totalMatches: combinedResults.length,

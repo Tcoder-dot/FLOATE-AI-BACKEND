@@ -1,6 +1,6 @@
 {
   "name": "Telegram Bot Logic",
-  "description": "Backend logic, command handlers, and webhook engine for Telegram Bot",
+  "description": "Backend logic, WhatsApp & Telegram bot engines, Spotlight carousel discovery, and conversational AI routing for Floate",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

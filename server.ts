@@ -104,9 +104,12 @@ async function startServer() {
         query: searchResult.query,
         totalMatches: searchResult.totalMatches,
         results: searchResult.results,
+        spotlightListings: searchResult.spotlightListings,
+        organicListings: searchResult.organicListings,
         exactMatches: searchResult.exactMatches,
         categoryMatches: searchResult.categoryMatches,
         moreBusinessesDeepLink: searchResult.moreBusinessesDeepLink,
+        moreBusinessesWhatsAppDeepLink: searchResult.moreBusinessesWhatsAppDeepLink,
       });
     } catch (error: any) {
       console.error('[API /api/search Error]:', error);
