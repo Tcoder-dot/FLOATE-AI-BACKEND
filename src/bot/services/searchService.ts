@@ -227,7 +227,7 @@ export async function executeSearch(input: SearchInput): Promise<SearchExecution
   const spotlightListings: MatchedVendorResult[] = [];
   const spotlightIds = new Set<string>();
 
-  // A. Matched spotlight listings first
+  // A. Only include spotlight businesses that legitimately matched the search query / category
   for (const item of combinedResults) {
     if (item.isHighlyRecommended && !spotlightIds.has(item.id)) {
       spotlightIds.add(item.id);
@@ -235,19 +235,10 @@ export async function executeSearch(input: SearchInput): Promise<SearchExecution
     }
   }
 
-  // B. Supplement with verified spotlight seed listings so the carousel always has up to 7 slides
-  if (spotlightListings.length < 7) {
-    const allListings = sheetsDb.getAllListings();
-    for (const b of allListings) {
-      if (spotlightListings.length >= 7) break;
-      if ((isSpotlightBusiness(b.businessName) || b.isHighlyRecommended) && !spotlightIds.has(b.id)) {
-        spotlightIds.add(b.id);
-        spotlightListings.push(formatResultItem(b));
-      }
-    }
-  }
-
-  const organicListings = combinedResults.filter((r) => !r.isHighlyRecommended);
+  const spotlightNames = new Set(spotlightListings.map((s) => s.businessName.toLowerCase().trim()));
+  const organicListings = combinedResults.filter(
+    (r) => !r.isHighlyRecommended && !spotlightIds.has(r.id) && !spotlightNames.has(r.businessName.toLowerCase().trim())
+  );
 
   const moreBusinessesDeepLink = generateMoreBusinessesDeepLink(rawQuery, input.location || parsed.targetSellerLocation);
   const cleanBotWaPhone = (process.env.WHATSAPP_PHONE_NUMBER || '2348000000000').replace(/\D/g, '');

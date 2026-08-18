@@ -1457,6 +1457,21 @@ export function setupMessageHandlers(bot: any) {
       return;
     }
 
+    if (nlIntent === 'EDIT_PRODUCT' && isRegisteredBusiness(userId)) {
+      await startEditProductFlow(ctx, userId);
+      return;
+    }
+
+    if (nlIntent === 'MY_STATS' && isRegisteredBusiness(userId)) {
+      await showMyStatsFlow(ctx, userId);
+      return;
+    }
+
+    if (nlIntent === 'MY_LISTINGS' && isRegisteredBusiness(userId)) {
+      await showMyListings(ctx, userId);
+      return;
+    }
+
     // Direct AI command execution: pass transcribed voice message straight to AI search system
     await handleBuyerSearch(ctx, userId, username, searchQuery);
   });
@@ -1657,6 +1672,11 @@ export function setupMessageHandlers(bot: any) {
 
     if (nlIntent === 'ADD_PRODUCT' && isRegisteredBusiness(userId)) {
       await startAddProductFlow(ctx, userId);
+      return;
+    }
+
+    if (nlIntent === 'EDIT_PRODUCT' && isRegisteredBusiness(userId)) {
+      await startEditProductFlow(ctx, userId);
       return;
     }
 
@@ -2078,12 +2098,13 @@ async function getTelegramFileBuffer(ctx: Context, fileId: string): Promise<{ bu
 }
 
 /** Helper function to detect natural language intent */
-function checkNaturalLanguageIntent(rawText: string): 'REGISTER' | 'CLAIM' | 'ADD_PRODUCT' | 'MY_STATS' | 'MY_LISTINGS' | null {
+function checkNaturalLanguageIntent(rawText: string): 'REGISTER' | 'CLAIM' | 'ADD_PRODUCT' | 'EDIT_PRODUCT' | 'MY_STATS' | 'MY_LISTINGS' | null {
   if (!rawText) return null;
   const t = rawText.toLowerCase().trim();
 
   if (
-    /\b(register\s+(my\s+)?(business|store|shop|account)|i\s+want\s+to\s+register|how\s+(can|do)\s+i\s+register|create\s+(a\s+)?(business|store|shop)|list\s+my\s+(business|store|shop|product)|sign\s+up\s+(as\s+a\s+)?(merchant|seller|vendor|business)|open\s+(a\s+)?(store|shop)|onboard\s+my\s+(business|shop|store))\b/i.test(t)
+    /\b(register\s+(my\s+)?(business|store|shop|account|company)|i\s+want\s+to\s+(register|sell|start\s+selling|list\s+my\s+shop|create\s+a\s+shop)|how\s+(can|do)\s+i\s+(register|start\s+selling|sell|list\s+my\s+shop)|create\s+(a\s+)?(business|store|shop)|list\s+my\s+(business|store|shop|company|products)|sign\s+up\s+(as\s+a\s+)?(merchant|seller|vendor|business)|open\s+(a\s+)?(store|shop)|onboard\s+my\s+(business|shop|store)|become\s+a\s+(seller|vendor|merchant)|sell\s+on\s+floate|merchant\s+registration|vendor\s+registration)\b/i.test(t) ||
+    /^(register|register business|register my business|register shop|start selling|sell|vendor registration|merchant registration|open shop|add my shop|list my shop)$/i.test(t)
   ) {
     return 'REGISTER';
   }
@@ -2095,19 +2116,29 @@ function checkNaturalLanguageIntent(rawText: string): 'REGISTER' | 'CLAIM' | 'AD
   }
 
   if (
-    /\b(add\s+(a\s+)?(product|item|listing|stock)|i\s+want\s+to\s+add\s+(a\s+)?(product|item))\b/i.test(t)
+    /\b(add\s+(a\s+)?(new\s+)?(product|item|listing|stock)|i\s+want\s+to\s+add\s+(a\s+)?(new\s+)?(product|item)|upload\s+(a\s+)?(new\s+)?(product|item)|post\s+(a\s+)?(new\s+)?(product|item)|list\s+(a\s+)?(new\s+)?(product|item))\b/i.test(t) ||
+    /^(add product|addproduct|add item|new product|list product|upload product|add a product|post product)$/i.test(t)
   ) {
     return 'ADD_PRODUCT';
   }
 
   if (
-    /\b(my\s+stats|store\s+stats|business\s+stats|how\s+many\s+searches|view\s+stats)\b/i.test(t)
+    /\b(edit\s+(my\s+)?(product|products|item|items|listing|listings|prices|catalog|store)|modify\s+(my\s+)?(product|products|item|items|listing|listings)|update\s+(my\s+)?(product|products|prices|listings)|manage\s+(my\s+)?(products|inventory))\b/i.test(t) ||
+    /^(edit product|edit products|editproduct|edit listings|my inventory|inventory|manage products|edit prices|update product|edit my products)$/i.test(t)
+  ) {
+    return 'EDIT_PRODUCT';
+  }
+
+  if (
+    /\b(my\s+stats|store\s+stats|business\s+stats|how\s+many\s+searches|view\s+stats|shop\s+performance|business\s+performance|my\s+analytics|how\s+is\s+my\s+shop\s+doing|how\s+is\s+my\s+business\s+performing)\b/i.test(t) ||
+    /^(stats|my stats|view stats|performance|analytics|my business stats|business stats|store stats)$/i.test(t)
   ) {
     return 'MY_STATS';
   }
 
   if (
-    /\b(my\s+listings|view\s+my\s+listings|show\s+my\s+products|my\s+catalog)\b/i.test(t)
+    /\b(my\s+listings|view\s+my\s+listings|show\s+my\s+products|my\s+catalog|my\s+products|view\s+my\s+products|view\s+catalog)\b/i.test(t) ||
+    /^(my listings|my products|view listings|view products)$/i.test(t)
   ) {
     return 'MY_LISTINGS';
   }

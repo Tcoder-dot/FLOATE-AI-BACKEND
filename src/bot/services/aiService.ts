@@ -58,197 +58,7 @@ export interface ParsedCommerceQuery {
   inferredCategories?: string[]; // Tightly-related categories/services inferred by AI, e.g. ["Legal Services", "Legal Consultation", "Attorney", "Law Firm"]
   itemType?: 'product' | 'service'; // Gemini's judgment on whether the item is a product or service
   isRegistrationRequest?: boolean;
-  isConversational?: boolean; // True if user is greeting, asking how are you, praising, or asking vague chat
-  conversationalReply?: string; // Natural human response asking "how can I help you today?"
   friendlyAck?: string;
-}
-
-export interface ConversationalIntentResult {
-  isConversational: boolean;
-  isReportRequest?: boolean;
-  replyText?: string;
-  intent?: 'BRAND_QUESTION' | 'OFF_TOPIC' | 'SHOPPING_SEARCH' | 'REPORT_DISPUTE';
-}
-
-export interface QueryIntentClassification {
-  intent: 'SHOPPING_SEARCH' | 'BRAND_QUESTION' | 'OFF_TOPIC' | 'REPORT_DISPUTE';
-  conversationalReply?: string;
-  cleanKeywords?: string;
-  category?: string;
-  location?: string;
-  isRegistrationRequest?: boolean;
-}
-
-/**
- * Fast deterministic conversational intent classifier for greetings, pleasantries, compliments, identity, and support/reporting questions.
- */
-export function getConversationalIntent(rawText: string, senderName?: string): ConversationalIntentResult | null {
-  const text = rawText.toLowerCase().trim();
-  const clean = text.replace(/[^a-z0-9 _]+/g, '').replace(/\s+/g, ' ');
-  const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
-  const prefix = name ? `Hello ${name}, ` : 'Hello, ';
-
-  // 1. Report a vendor / Scam / Fraud / Complaint / Dispute
-  if (
-    /\b(report\s+(a\s+)?(vendor|seller|shop|business|store|merchant)|report\s+them|report\s+him|report\s+her|i want to report|scam|fraud|scammer|fake vendor|fake seller|scammed|cheated|stole my money|stolen|vendor problem|vendor issue|dispute|complaint)\b/i.test(clean) ||
-    /^(report|report vendor|report a vendor|report business|report scam|scam|fraud|complaint)$/i.test(clean)
-  ) {
-    return {
-      isConversational: true,
-      isReportRequest: true,
-      intent: 'REPORT_DISPUTE',
-      replyText: `${prefix}I am sorry to hear you are having an issue. Please tell me what happened, what the vendor did, and the vendor's name or phone number so we can look into it for you.`,
-    };
-  }
-
-  // 2. General Support / Customer Care Inquiries
-  if (
-    /\b(customer care|customer service|help desk|contact support|contact us|contact email|support email)\b/i.test(clean) ||
-    /^(support|help|customer care)$/i.test(clean)
-  ) {
-    return {
-      isConversational: true,
-      intent: 'BRAND_QUESTION',
-      replyText: `${prefix}for general inquiries you can reach us at support@floate.xyz, or if you need to report a vendor or issue, please describe what happened so we can assist you.`,
-    };
-  }
-
-  // 3. "How are you" / "How are you doing" / "How is your day" / "How far"
-  if (
-    /^(hello|hi|hey)?\s*(floate\s*)?(how (are|r) (you|u)|how (are|r) (you|u) doing|how is your day|hows your day|how is everything|how body|how you dey|how things|hope (you are|youre|all is) (good|fine|well|great)|what'?s up|wassup)(\s*floate)?$/i.test(clean) ||
-    /\b(how are you doing today|how are you today|how are you|how is your day going|hope your day is going well)\b/i.test(clean)
-  ) {
-    return {
-      isConversational: true,
-      intent: 'BRAND_QUESTION',
-      replyText: `${prefix}I am doing well, thank you. How can I help you today?`,
-    };
-  }
-
-  // 4. Compliments / Appreciation ("You're doing a nice job", "Well done", "Thank you")
-  if (
-    /\b(you('?re| are) doing (a )?(nice|great|good|wonderful|amazing) job|nice job|great job|good job|well done|you are doing great|thank you so much|thank you|thanks a lot|appreciate your help|appreciate you)\b/i.test(clean) ||
-    /^(thank you|thanks|thanks floate|thank you floate|well done|nice one|good job|great work)$/i.test(clean)
-  ) {
-    return {
-      isConversational: true,
-      intent: 'BRAND_QUESTION',
-      replyText: `${prefix}thank you so much. What would you like to shop for today?`,
-    };
-  }
-
-  // 5. Identity & About ("Who are you", "What is Floate", "What do you do", "How does this work")
-  if (
-    /^(who (are|r) (you|u)|what is floate|what do you do|what can you do|how does (this|floate) work|introduce yourself|tell me about floate)(\s+floate)?$/i.test(clean)
-  ) {
-    return {
-      isConversational: true,
-      intent: 'BRAND_QUESTION',
-      replyText: `${prefix}Floate is your intelligent Nigerian commerce platform connecting you directly with verified merchants, major open markets, and service professionals nationwide. What would you like to shop for today?`,
-    };
-  }
-
-  // 6. Pure Greetings ("Hello floate", "Hi", "Good morning", "Good afternoon", "Good evening")
-  if (
-    /^(hello|hi|hey|good morning|good afternoon|good evening|good day|greetings|start)(\s+(floate|flote|there|ai|bot))?$/i.test(clean) ||
-    /^(hello floate|hello_floate|hellofloate|hi floate|hi_floate|hifloate|good morning floate|good afternoon floate|good evening floate)$/i.test(clean)
-  ) {
-    return {
-      isConversational: true,
-      intent: 'BRAND_QUESTION',
-      replyText: `${prefix}what would you like to shop for today?`,
-    };
-  }
-
-  // 7. Off-Topic Chit Chat Fallback Patterns (Jokes, weather, code, personal trivia)
-  if (
-    /^(tell me a joke|write a poem|write code|who is the president|what is the weather|what time is it|sing a song|are you single|tell me about yourself)$/i.test(clean)
-  ) {
-    return {
-      isConversational: true,
-      intent: 'OFF_TOPIC',
-      replyText: `${prefix}I am just here to help you find what you need on Floate. What are you shopping for today?`,
-    };
-  }
-
-  return null;
-}
-
-/**
- * Lightweight Gemini Intent Classification Layer:
- * Evaluates whether a query is a genuine brand question, off-topic chit-chat, or shopping search.
- */
-export async function classifyQueryIntentWithGemini(userQuery: string, senderName?: string): Promise<QueryIntentClassification> {
-  const norm = (userQuery || '').trim();
-  const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
-  const prefix = name ? `Hello ${name}, ` : 'Hello, ';
-
-  // Check deterministic rules first
-  const deterministic = getConversationalIntent(norm, senderName);
-  if (deterministic) {
-    if (deterministic.intent === 'REPORT_DISPUTE') {
-      return { intent: 'REPORT_DISPUTE', conversationalReply: deterministic.replyText };
-    }
-    if (deterministic.intent === 'BRAND_QUESTION') {
-      return { intent: 'BRAND_QUESTION', conversationalReply: deterministic.replyText };
-    }
-    if (deterministic.intent === 'OFF_TOPIC') {
-      return { intent: 'OFF_TOPIC', conversationalReply: deterministic.replyText };
-    }
-  }
-
-  const ai = getAIClient();
-  if (!ai) {
-    return { intent: 'SHOPPING_SEARCH', cleanKeywords: norm };
-  }
-
-  try {
-    const response = await generateContentWithFallback(ai, {
-      contents: `You are the intent classification and brand voice engine for Floate (African & Nigerian commerce platform).
-A user sent this message: "${norm}"
-
-Task: Classify this message into one of three intents:
-1. "BRAND_QUESTION": The user is asking about Floate, how Floate works, what businesses or markets are available, how vendor registration works, safety, contact/support, or how to buy/sell on Floate.
-   -> Provide "conversationalReply": A helpful, natural, accurate 1-line answer in standard Nigerian English. Strictly NO emojis, straight line answer with no paragraph breaks.
-2. "OFF_TOPIC": The user is asking something completely unrelated to shopping, commerce, products, services, or Floate (e.g. general chit-chat, jokes, unrelated personal questions, coding, trivia, politics).
-   -> Provide "conversationalReply": A polite, warm redirect back to shopping e.g. "${prefix}I am just here to help you find what you need on Floate. What are you shopping for today?" (NO emojis, straight line).
-3. "SHOPPING_SEARCH": The user is searching for a product, service, item, price, or vendor to buy or hire (e.g. "shoes in onitsha", "iphone 13", "video editor", "lawyer", "solar inverter", "where can i buy wigs").
-   -> "cleanKeywords": The clean product/service name without conversational fluff.
-
-Return strictly JSON:
-{
-  "intent": "BRAND_QUESTION" | "OFF_TOPIC" | "SHOPPING_SEARCH",
-  "conversationalReply": "string or null",
-  "cleanKeywords": "string or null",
-  "category": "string or null",
-  "location": "string or null"
-}`,
-    });
-
-    const text = response.text || '';
-    const cleanJson = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    const json = JSON.parse(cleanJson);
-
-    if (json.intent === 'BRAND_QUESTION' || json.intent === 'OFF_TOPIC') {
-      let reply = json.conversationalReply || `${prefix}what would you like to shop for today?`;
-      // Ensure no emojis and straight line
-      reply = reply.replace(/[\u{1F600}-\u{1F6FF}|\u{1F300}-\u{1F5FF}|\u{1F680}-\u{1F6FF}|\u{1F1E0}-\u{1F1FF}|\u{2600}-\u{26FF}|\u{2700}-\u{27BF}]/gu, '').replace(/\n+/g, ' ').trim();
-      return {
-        intent: json.intent,
-        conversationalReply: reply,
-      };
-    }
-
-    return {
-      intent: 'SHOPPING_SEARCH',
-      cleanKeywords: json.cleanKeywords || norm,
-      category: json.category || undefined,
-      location: json.location || undefined,
-    };
-  } catch (err) {
-    console.warn('[Gemini Intent Classifier Notice]:', err);
-    return { intent: 'SHOPPING_SEARCH', cleanKeywords: norm };
-  }
 }
 
 /**
@@ -410,15 +220,13 @@ The user message may be in English, Nigerian Pidgin, Yoruba, or Igbo.
 
 User message: "${userQuery}"
 
-Task: Extract structured details:
-1. "isConversational": true if this message is a greeting, pleasantry, compliment, "how are you" question, or general conversational chit-chat rather than a search for a specific product or service to buy.
-2. "conversationalReply": If isConversational is true, provide a warm, natural 1-2 sentence response greeting them, acknowledging their question or compliment politely, and asking "How can I help you today? What would you like to shop for?" (in natural Nigerian English).
-3. "cleanProduct": The clean main product or service name ONLY (e.g. "Phone", "Laptop", "Lawyer", "Video Editor", "Leather Slippers"). Strip out conversational noise like "I want to buy", "I need a", "looking for someone to". If isConversational is true and no item was mentioned, set to null.
-4. "maxPriceNaira": Maximum budget in Nigerian Naira as a number (e.g., "200k" -> 200000, "5k" -> 5000, "1.5m" -> 1500000). Return null if no budget mentioned.
-5. "buyerLocation": The BUYER's own location if mentioned (e.g. "my location is Agbani", "I stay in Agbani" -> "Agbani").
-6. "targetSellerLocation": The required SELLER location (State, City, or Market Area) if user mentioned a seller location or location preference (e.g., "seller in Enugu", "in Onitsha", "from Lagos", "in Agbani", "in Imo"). If user only gave their own location, set targetSellerLocation to null.
-7. "category": Broad product or service category (e.g. "Phones & Accessories", "Computers", "Legal Services", "Media & Video Production", "Footwear", "Clothing").
-8. "inferredCategories": An array of 3 to 6 tightly-related business category names, service types, or synonym terms that represent businesses capable of fulfilling this request.
+Task: Extract structured commerce details:
+1. "cleanProduct": The clean main product or service name ONLY (e.g. "Phone", "Laptop", "Lawyer", "Video Editor", "Leather Slippers"). Strip out conversational noise like "I want to buy", "I need a", "looking for someone to".
+2. "maxPriceNaira": Maximum budget in Nigerian Naira as a number (e.g., "200k" -> 200000, "5k" -> 5000, "1.5m" -> 1500000). Return null if no budget mentioned.
+3. "buyerLocation": The BUYER's own location if mentioned (e.g. "my location is Agbani", "I stay in Agbani" -> "Agbani").
+4. "targetSellerLocation": The required SELLER location (State, City, or Market Area) if user mentioned a seller location or location preference (e.g., "seller in Enugu", "in Onitsha", "from Lagos", "in Agbani", "in Imo"). If user only gave their own location, set targetSellerLocation to null.
+5. "category": Broad product or service category (e.g. "Phones & Accessories", "Computers", "Legal Services", "Media & Video Production", "Footwear", "Clothing").
+6. "inferredCategories": An array of 3 to 6 tightly-related business category names, service types, or synonym terms that represent businesses capable of fulfilling this request.
    Examples:
    - "I need a lawyer" -> ["Legal Services", "Legal Consultation", "Attorney", "Law Firm", "Lawyer", "Legal Advocate"]
    - "someone to edit my videos" -> ["Video Editor", "Video Editing Services", "Videographer", "Media Production", "Content Creation"]
@@ -426,13 +234,11 @@ Task: Extract structured details:
    - "catering for wedding" -> ["Catering Services", "Caterer", "Event Catering", "Food Services"]
    - "leather slippers" -> ["Footwear", "Leather Slippers", "Shoes", "Plaited Slippers", "Sandals"]
    Do NOT include vague/overly broad words like "Business", "Services", "Shop", "General", "Other".
-9. "itemType": Either "product" or "service". Determine whether the clean item requested represents a physical product (e.g. "Phone", "Cloth", "Shoes", "Generator") or a service/profession to be hired or booked (e.g. "Lawyer", "Video Editor", "Mechanic", "Catering", "Graphic Designer", "Tutor", "Consultant", "Photographer").
-10. "isRegistrationRequest": true ONLY if user wants to register as a business/seller.
+7. "itemType": Either "product" or "service". Determine whether the clean item requested represents a physical product (e.g. "Phone", "Cloth", "Shoes", "Generator") or a service/profession to be hired or booked (e.g. "Lawyer", "Video Editor", "Mechanic", "Catering", "Graphic Designer", "Tutor", "Consultant", "Photographer").
+8. "isRegistrationRequest": true ONLY if user wants to register as a business/seller.
 
 Return ONLY valid JSON format like:
 {
-  "isConversational": false,
-  "conversationalReply": null,
   "cleanProduct": "Lawyer",
   "maxPriceNaira": null,
   "buyerLocation": null,
@@ -463,8 +269,6 @@ Return ONLY valid JSON format like:
         inferredCategories: inferredCats.length > 0 ? inferredCats : [json.cleanProduct || userQuery, ...(json.category ? [json.category] : [])],
         itemType: parsedItemType,
         isRegistrationRequest: Boolean(json.isRegistrationRequest),
-        isConversational: Boolean(json.isConversational),
-        conversationalReply: json.conversationalReply || undefined,
         friendlyAck: `Connecting you to a verified seller for ${json.cleanProduct || 'items'}...`,
       };
     } catch (err) {

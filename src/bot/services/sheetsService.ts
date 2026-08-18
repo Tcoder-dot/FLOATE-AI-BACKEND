@@ -63,24 +63,25 @@ export interface BusinessListing {
 
 /**
  * Checks if a business name matches one of the spotlight / highly recommended vendor accounts:
- * - MAKKY'S LUXE
- * - CHIVORA
- * - MBAMS
- * - SAMPLE STORE
- * - GOODY'S COLLECTION
+ * - Chivora
+ * - MAKKY LUXE
+ * - Mbams
+ * - goody's
+ * - jules
  */
 export function isSpotlightBusiness(businessName: string): boolean {
   if (!businessName) return false;
   const clean = businessName.toLowerCase().replace(/[^a-z0-9]+/g, '');
   return (
-    clean.includes('makkysluxe') ||
-    clean.includes('makkys') ||
     clean.includes('chivora') ||
+    clean.includes('makkyluxe') ||
+    clean.includes('makky') ||
     clean.includes('mbams') ||
-    clean.includes('samplestore') ||
-    clean.includes('goodyscollection') ||
+    clean.includes('mbam') ||
     clean.includes('goodys') ||
-    clean.includes('goody')
+    clean.includes('goody') ||
+    clean.includes('jules') ||
+    clean.includes('jule')
   );
 }
 
@@ -1591,8 +1592,10 @@ class SheetsDatabaseService {
         }
       }
 
-      if (b.isHighlyRecommended || isSpotlightBusiness(b.businessName)) {
-        score += 2000;
+      // Direct business name search match (e.g., user specifically searches for "Chivora", "Makky Luxe", "Mbams", "Goody's", "Jules")
+      if (cleanQ && (biz.includes(cleanQ) || (cleanQ.length >= 4 && cleanQ.includes(biz)))) {
+        score += 2500;
+        exactProductMatch = true;
       }
 
       // Token matching
@@ -1608,13 +1611,23 @@ class SheetsDatabaseService {
         } else if (category.includes(tok) && !genericStopWords.has(tok)) {
           score += 20;
         } else if (biz.includes(tok)) {
-          score += 10;
+          score += 15;
+          exactProductMatch = true;
         }
       }
 
       // Category match hint
       if (cat && !genericStopWords.has(cat) && (category.includes(cat) || prod.includes(cat))) {
-        score += 15;
+        score += 25;
+        exactProductMatch = true;
+      }
+
+      // Spotlight Business Prioritization:
+      // Spotlight boost applies when the business legitimately matches the category, product, or query
+      if (b.isHighlyRecommended || isSpotlightBusiness(b.businessName)) {
+        if (exactProductMatch || score > 0) {
+          score += 500;
+        }
       }
 
       // Location match check

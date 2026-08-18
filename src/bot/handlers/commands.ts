@@ -22,8 +22,15 @@ export function setupCommandHandlers(bot: any) {
     // Reset registration step on start
     userStore.clearFlowState(userId);
 
-    // Check if start command contains register_business CTA deep link
+    // Check if start command contains register_business or referral CTA deep link
     const matchParam = typeof ctx.match === 'string' ? ctx.match.trim() : '';
+
+    if (matchParam && matchParam.startsWith('ref_')) {
+      const referrerId = matchParam.replace('ref_', '').trim();
+      if (referrerId) {
+        userStore.setFlowState(userId, userStore.getProfile(userId).registrationStep || 'NONE', { referredBy: referrerId });
+      }
+    }
 
     if (matchParam && (matchParam === 'register_business' || matchParam === 'register' || matchParam.startsWith('register_') || matchParam === 'seller')) {
       if (isRegisteredBusiness(userId)) {

@@ -29,6 +29,7 @@ export type RegistrationStep =
   | 'AWAITING_CLAIM_OWNER_NAME'
   | 'AWAITING_CLAIM_SELFIE'
   | 'AWAITING_EDIT_INVENTORY_DRAFT'
+  | 'AWAITING_SUPPORT_REPORT'
   | 'SAVING'
   | 'NONE';
 
@@ -61,6 +62,7 @@ export interface UserProfile {
   tempNegotiable?: 'Yes' | 'No';
   selectedListingId?: string;
   selectedEditAction?: 'NAME' | 'PRICE' | 'DELETE' | 'WHATSAPP';
+  referredBy?: string;
 }
 
 class UserStore {

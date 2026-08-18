@@ -40,6 +40,8 @@ export async function finishLeadQualification(
   // 1. Deliver WhatsApp link and congratulation message to buyer
   try {
     const targetUserId = ctx.from?.id || qual.buyerId;
+    const referralLink = `https://t.me/Floatebusinessbot?start=ref_${encodeURIComponent(String(targetUserId))}`;
+
     await ctx.api.sendMessage(
       targetUserId,
       `🎉 *Connection Successful! Direct WhatsApp Access Granted*\n\n` +
@@ -53,7 +55,8 @@ export async function finishLeadQualification(
       `Tap the button below to message them directly on WhatsApp:\n` +
       `👉 [Chat Direct on WhatsApp](${waLink})\n\n` +
       `_We have also notified ${qual.merchantName} that a customer is reaching out on WhatsApp!_\n\n` +
-      `⚠️ *Important Notice:* _Floate AI connects buyers and vendors. We are not affiliated with merchants and do not guarantee products, delivery, or payments. Please verify the seller before making payment. Floate is not responsible for transactions or disputes occurring off-platform._`,
+      `⚠️ *Important Notice:* _Floate AI connects buyers and vendors. We are not affiliated with merchants and do not guarantee products, delivery, or payments. Please verify the seller before making payment. Floate is not responsible for transactions or disputes occurring off-platform._\n\n` +
+      `🎁 *Know someone who'd love this?* Share Floate with them: ${referralLink}`,
       {
         parse_mode: 'Markdown',
         reply_markup: waKb,

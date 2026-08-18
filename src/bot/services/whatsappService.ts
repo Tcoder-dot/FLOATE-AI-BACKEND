@@ -6,8 +6,6 @@ import {
   parseShoppingQuery,
   transcribeAndAnalyzeAudio,
   validateSelfieWithGeminiVision,
-  getConversationalIntent,
-  classifyQueryIntentWithGemini,
 } from './aiService.js';
 import {
   getWhatsAppSession,
@@ -541,8 +539,19 @@ export async function processMasterWhatsAppEngine(params: {
     return;
   }
 
-  // 1b. Location Update Trigger (e.g. "change my location", "update location", "set location")
-  if (/^(change( my)? location|update( my)? location|set( my)? location|switch location|my location)$/i.test(cleanLower)) {
+  // 1b. Location Update Trigger (e.g. "change my location", "update location to Lagos", "set location Abuja")
+  const locChangeMatch = cleanLower.match(/^(?:change|update|set|switch)\s+(?:my\s+)?(?:location|city)(?:\s+to\s+(.+))?$/i);
+  if (locChangeMatch || /^(my location|change location|update location|switch location)$/i.test(cleanLower)) {
+    const inlineLoc = locChangeMatch && locChangeMatch[1] ? locChangeMatch[1].trim() : null;
+    if (inlineLoc) {
+      await firestoreDb.updateBuyerPrimaryLocation(senderPhone, inlineLoc);
+      updateWhatsAppSession(senderPhone, { state: 'IDLE' });
+      await sendWhatsAppMessage(
+        senderPhone,
+        `Your default location has been updated to ${inlineLoc}. What would you like to shop for today?`
+      );
+      return;
+    }
     updateWhatsAppSession(senderPhone, { state: 'AWAITING_LOCATION_CHANGE' });
     await sendWhatsAppMessage(
       senderPhone,
@@ -607,76 +616,63 @@ export async function processMasterWhatsAppEngine(params: {
     }
   }
 
-  // 2. Conversational Intent & Pleasantries Interceptor (greetings, "how are you", compliments, identity, support, reports)
-  const convIntent = getConversationalIntent(text, senderName);
-  if (convIntent && convIntent.isConversational) {
-    if (convIntent.isReportRequest) {
-      updateWhatsAppSession(senderPhone, {
-        state: 'REPORT_PROCESS',
-        reportDraft: {
-          step: 'AWAITING_DETAILS',
-          vendorId: session.activeVendorId || '',
-          vendorName: session.activeVendorName || '',
-          vendorPhone: session.activeVendorPhone || '',
-          updatedAt: new Date().toISOString(),
-        },
-      });
-      await sendWhatsAppMessage(
-        senderPhone,
-        convIntent.replyText || 'I am sorry to hear you are having an issue with a vendor. Please tell me what happened, what the vendor did, and the vendor\'s name or phone number so we can look into it for you.'
-      );
-      return;
-    }
-
+  // 2. Simple Greeting & Small-Talk Handler (Intercept before buyer search)
+  const isGreeting = /^(hi|hi floate|hello|hello floate|hey|hey floate|good morning|good afternoon|good evening|start|\/start)$/i.test(cleanLower);
+  if (isGreeting) {
     resetWhatsAppSession(senderPhone);
     await firestoreDb.resetUserSession(senderPhone);
-
-    const buyer = await firestoreDb.getOrCreateBuyerAccount(senderPhone, 'whatsapp', senderName);
-    const alreadySeenTip = await firestoreDb.hasUserSeenSaveTip(senderPhone);
-    const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
-    const prefix = name ? `Hello ${name}, ` : 'Hello, ';
-
-    if (!alreadySeenTip && !buyer.primaryLocation) {
-      // First-time contact greeting with complete guidelines, support email, and save tip + Role Prompt
-      const msg = `${prefix}welcome to Floate. You can find verified vendors and products across Nigeria by simply typing what you want, registering your business, or asking for help. To report a business or contact support, email us at support@floate.xyz. Please save this number as Floate for quick access anytime.\n\nAre you shopping with Floate or would you like to register your business with Floate?`;
-
-      updateWhatsAppSession(senderPhone, { state: 'AWAITING_ROLE_SELECTION', hasSeenSaveTip: true });
-      await firestoreDb.markUserSeenSaveTip(senderPhone);
-
-      await sendWhatsAppMessage(senderPhone, msg);
-      return;
-    } else {
-      // Returning user conversational reply (straight line, no emojis, no paragraphs, no buttons)
-      const replyMsg = convIntent.replyText || `${prefix}what would you like to shop for today?`;
-      await sendWhatsAppMessage(senderPhone, replyMsg);
-      return;
-    }
+    await sendWelcomeGreeting(senderPhone, senderName);
+    return;
   }
 
-  // 3. Deep-Linked Register Business / Vendor Hub / Merchant Portal Trigger
+  const isSmallTalk = /^(how are you|how are you doing|how far|how body|how are you today)$/i.test(cleanLower);
+  if (isSmallTalk) {
+    const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
+    const prefix = name ? `Hello ${name}, ` : 'Hello, ';
+    await sendWhatsAppMessage(
+      senderPhone,
+      `${prefix}I am doing well, thank you. What would you like to shop for today?`
+    );
+    return;
+  }
+
+  // 3. Deep-Linked Register Business / Vendor Hub / Merchant Portal Trigger (Supports Natural Language)
   if (
     text === 'START_REGISTER_VENDOR' ||
     text === 'btn_for_businesses' ||
     text === 'btn_vendor_portal' ||
     text === 'btn_vendor_dashboard' ||
-    /^(register_business|start_register_vendor|register business|vendor|business|vendor hub|merchant|add my shop|list my shop|my business|vendor portal|manage|merchant portal|dashboard|my store|store)$/i.test(cleanLower)
+    /\b(register\s+(my\s+)?(business|store|shop|account|company)|i\s+want\s+to\s+(register|sell|start\s+selling|list\s+my\s+shop|create\s+a\s+shop)|how\s+(can|do)\s+i\s+(register|start\s+selling|sell|list\s+my\s+shop)|create\s+(a\s+)?(business|store|shop)|list\s+my\s+(business|store|shop|company)|sign\s+up\s+(as\s+a\s+)?(merchant|seller|vendor|business)|open\s+(a\s+)?(store|shop)|onboard\s+my\s+(business|shop|store)|become\s+a\s+(seller|vendor|merchant)|sell\s+on\s+floate|merchant\s+registration|vendor\s+registration)\b/i.test(cleanLower) ||
+    /^(register|register business|register my business|register shop|start selling|sell|vendor registration|merchant registration|open shop|add my shop|list my shop|vendor|business|vendor hub|merchant|my business|vendor portal|manage|merchant portal|dashboard|my store|store)$/i.test(cleanLower)
   ) {
     await handleVendorHubRouting(senderPhone, senderName);
     return;
   }
 
-  // 4. Vendor Self-Service Direct Action Triggers
-  if (text === 'btn_vendor_stats' || /^(stats|view stats|performance|my stats)$/i.test(cleanLower)) {
+  // 4. Vendor Self-Service Direct Action Triggers (Supports Natural Language)
+  if (
+    text === 'btn_vendor_stats' ||
+    /\b(my\s+stats|store\s+stats|business\s+stats|how\s+many\s+searches|view\s+stats|shop\s+performance|business\s+performance|my\s+analytics|how\s+is\s+my\s+shop\s+doing|how\s+is\s+my\s+store\s+performing|how\s+is\s+my\s+business\s+performing)\b/i.test(cleanLower) ||
+    /^(stats|view stats|performance|my stats|mystats|my business stats|business stats|store stats|analytics)$/i.test(cleanLower)
+  ) {
     await handleVendorStats(senderPhone, senderName);
     return;
   }
 
-  if (text === 'btn_vendor_add_product' || /^(add product|add item|new product|list product)$/i.test(cleanLower)) {
+  if (
+    text === 'btn_vendor_add_product' ||
+    /\b(add\s+(a\s+)?(new\s+)?(product|item|listing|stock)|i\s+want\s+to\s+add\s+(a\s+)?(new\s+)?(product|item)|upload\s+(a\s+)?(new\s+)?(product|item)|post\s+(a\s+)?(new\s+)?(product|item)|list\s+(a\s+)?(new\s+)?(product|item))\b/i.test(cleanLower) ||
+    /^(add product|addproduct|add item|new product|list product|upload product|add a product|post product|add new product)$/i.test(cleanLower)
+  ) {
     await startVendorAddProduct(senderPhone, senderName);
     return;
   }
 
-  if (text === 'btn_vendor_edit_products' || /^(edit listings|edit products|my inventory|inventory|manage products|edit prices)$/i.test(cleanLower)) {
+  if (
+    text === 'btn_vendor_edit_products' ||
+    /\b(edit\s+(my\s+)?(product|products|item|items|listing|listings|prices|catalog|store)|modify\s+(my\s+)?(product|products|item|items|listing|listings)|update\s+(my\s+)?(product|products|prices|listings)|manage\s+(my\s+)?(products|inventory))\b/i.test(cleanLower) ||
+    /^(edit product|edit products|editproduct|edit listings|my inventory|inventory|manage products|edit prices|update product|edit my products)$/i.test(cleanLower)
+  ) {
     await startVendorEditProducts(senderPhone, senderName);
     return;
   }
@@ -1047,39 +1043,9 @@ export async function processMasterWhatsAppEngine(params: {
     return;
   }
 
-  // 12. Lightweight Gemini Intent Classifier & Natural Language Routing
-  const classification = await classifyQueryIntentWithGemini(text, senderName);
-
-  if (classification.intent === 'REPORT_DISPUTE') {
-    updateWhatsAppSession(senderPhone, {
-      state: 'REPORT_PROCESS',
-      reportDraft: {
-        step: 'AWAITING_DETAILS',
-        vendorId: session.activeVendorId || '',
-        vendorName: session.activeVendorName || '',
-        vendorPhone: session.activeVendorPhone || '',
-        updatedAt: new Date().toISOString(),
-      },
-    });
-    await sendWhatsAppMessage(
-      senderPhone,
-      classification.conversationalReply || 'I am sorry to hear you are having an issue with a vendor. Please tell me what happened, what the vendor did, and the vendor\'s name or phone number so we can look into it for you.'
-    );
-    return;
-  }
-
-  if (classification.intent === 'BRAND_QUESTION' || classification.intent === 'OFF_TOPIC') {
-    const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
-    const prefix = name ? `Hello ${name}, ` : 'Hello, ';
-    const reply = classification.conversationalReply || `${prefix}what would you like to shop for today?`;
-    await sendWhatsAppMessage(senderPhone, reply);
-    return;
-  }
-
-  // 13. Execute Natural Language Search Query (English, Pidgin, Local Market Slang)
+  // 12. Execute Natural Language Search Query directly
   await execute10CardSearch(senderPhone, senderName, {
-    queryText: classification.cleanKeywords || text,
-    location: classification.location,
+    queryText: text,
   });
 }
 
@@ -1124,15 +1090,6 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
     parsed = await parseShoppingQuery(queryText);
   } catch {
     parsed = { searchKeywords: queryText, targetSellerLocation: location };
-  }
-
-  // Intercept any conversational fallback detected by AI
-  if (parsed.isConversational) {
-    const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
-    const prefix = name ? `Hello ${name}, ` : 'Hello, ';
-    const reply = parsed.conversationalReply || `${prefix}what would you like to shop for today?`;
-    await sendWhatsAppMessage(toPhone, reply);
-    return;
   }
 
   const cleanProduct = parsed.searchKeywords || queryText;
@@ -1526,6 +1483,9 @@ async function finish3StepQualificationHandoff(
 
   resetWhatsAppSession(toPhone);
 
+  const buyerCleanPhone = toPhone.replace(/\D/g, '');
+  const referralLink = `https://floate.xyz/?ref=${encodeURIComponent(buyerCleanPhone)}`;
+
   const handoffMsg =
     `✅ *Verified Seller Ready to Connect*\n\n` +
     `🟢 *Status:* Verified Active Merchant\n` +
@@ -1536,7 +1496,8 @@ async function finish3StepQualificationHandoff(
     `📍 *Buyer Location:* ${location}\n\n` +
     `👉 *Connect to vendor:*\n` +
     `Tap the button below to message ${bizName} directly on WhatsApp:\n\n` +
-    `⚠️ *Buyer Safety:* _Always inspect items or agree on safe payment before sending money. FLOATE connects buyers and sellers with zero commission._`;
+    `⚠️ *Buyer Safety:* _Always inspect items or agree on safe payment before sending money. FLOATE connects buyers and sellers with zero commission._\n\n` +
+    `🎁 *Know someone who'd love this?* Share Floate with them: ${referralLink}`;
 
   await sendWhatsAppMessage(toPhone, handoffMsg, {
     ctaUrl: {
