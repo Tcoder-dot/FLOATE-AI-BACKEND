@@ -931,17 +931,16 @@ export async function processMasterWhatsAppEngine(params: {
     return;
   }
 
-  // 10. View More Businesses / Pagination Triggers
+  // 10. Show Next 10 Vendors Pagination
   if (
-    text === 'btn_view_more_businesses' ||
     text === 'btn_next_10_vendors' ||
     text === 'btn_next_5_vendors' ||
-    /^(more|view more|show more|more list|other list|other lists|more businesses|see more|next 10|next|show next)$/i.test(cleanLower)
+    cleanLower === 'next 10' ||
+    cleanLower === 'next' ||
+    cleanLower === 'show next'
   ) {
-    if (session.searchState?.allMatchingListings && session.searchState.allMatchingListings.length > 0) {
-      await handleShowNext10Vendors(senderPhone, senderName, session);
-      return;
-    }
+    await handleShowNext10Vendors(senderPhone, senderName, session);
+    return;
   }
 
   // 11. Vendor Selection & 3-Step Lead Qualification
@@ -1273,100 +1272,99 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
     },
   });
 
-  // SCENARIO: Spotlight Listings Present -> Present up to 7 top recommendations with direct connect & View More toggle
-  const spotlightTop7 = spotlightMatches.slice(0, 7);
-  const organicListings = organicMatches;
+  const spotlightInPrimary = primaryDisplay.filter(v => isSpotlightBusiness(v.businessName) || v.isHighlyRecommended);
+  const organicInPrimary = primaryDisplay.filter(v => !(isSpotlightBusiness(v.businessName) || v.isHighlyRecommended));
 
   const locNotice = targetLoc ? ` in *${targetLoc}*` : '';
-  let previewMsg = '';
+  let previewMsg = `🔍 *Businesses matching "${cleanProduct}"${locNotice}:*\n\n`;
 
+  if (spotlightInPrimary.length > 0) {
+    previewMsg += `*Top Spotlight Businesses*\n\n`;
+    for (let i = 0; i < spotlightInPrimary.length; i++) {
+      const v = spotlightInPrimary[i];
+      const idx = primaryDisplay.indexOf(v) + 1;
+      const priceDisplay = v.price || 'Market Rate';
+      previewMsg += `${idx}. *${v.businessName}* — ${v.product} (${priceDisplay})\n\n`;
+    }
+  }
+
+  if (organicInPrimary.length > 0) {
+    if (spotlightInPrimary.length > 0) {
+      previewMsg += `*Verified Vendors*\n\n`;
+    }
+    for (let i = 0; i < organicInPrimary.length; i++) {
+      const v = organicInPrimary[i];
+      const idx = primaryDisplay.indexOf(v) + 1;
+      const priceDisplay = v.price || 'Market Rate';
+      previewMsg += `${idx}. *${v.businessName}* — ${v.product} (${priceDisplay})\n\n`;
+    }
+  }
+
+  previewMsg +=
+    `────────────────────\n` +
+    `💡 *How to select:*\n` +
+    `• Tap *"Select Vendor"* below, OR\n` +
+    `• Reply with the number (e.g. \`1\`, \`2\`, \`3\`) or business name`;
+
+  // Build Native Slide-Up List Menu
   const menuSections: WhatsAppListSection[] = [];
 
-  if (spotlightTop7.length > 0) {
-    previewMsg = `⭐ *Top Recommended Businesses for "${cleanProduct}"${locNotice}:*\n\n`;
-
-    for (let i = 0; i < spotlightTop7.length; i++) {
-      const v = spotlightTop7[i];
-      const priceDisplay = v.price || 'Market Rate';
-      const locDisplay = v.city ? (v.state ? `${v.city}, ${v.state}` : v.city) : (v.state || 'Verified Location');
-      previewMsg += `${i + 1}. *${v.businessName}* — ${v.product} (${priceDisplay})\n📍 _${locDisplay}_\n\n`;
-    }
-
-    if (organicListings.length > 0) {
-      previewMsg +=
-        `────────────────────\n` +
-        `These are our best recommended businesses for your search. In case you want more listings, let me know by replying "more" or tapping "View More Businesses" below.\n\n` +
-        `💡 *How to connect:*\n` +
-        `• Tap *"Select Vendor"* below to connect directly, OR\n` +
-        `• Reply with the business number or name`;
-    } else {
-      previewMsg +=
-        `────────────────────\n` +
-        `These are our best recommended businesses for your search.\n\n` +
-        `💡 *How to connect:*\n` +
-        `• Tap *"Select Vendor"* below to connect directly, OR\n` +
-        `• Reply with the business number or name`;
-    }
-
+  if (spotlightInPrimary.length > 0) {
     menuSections.push({
-      title: '⭐ Spotlight Businesses',
-      rows: spotlightTop7.map((v, idx) => ({
-        id: `connect_biz_${v.id}`,
-        title: `${idx + 1}. ${v.businessName}`.substring(0, 24),
-        description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
-      })),
+      title: 'Top Spotlight Businesses',
+      rows: spotlightInPrimary.map((v) => {
+        const fullIdx = primaryDisplay.findIndex(p => p.id === v.id) + 1;
+        return {
+          id: `connect_biz_${v.id}`,
+          title: `${fullIdx}. ${v.businessName}`.substring(0, 24),
+          description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
+        };
+      }),
     });
+  }
 
-    if (organicListings.length > 0) {
-      menuSections.push({
-        title: '📋 More Listings',
-        rows: [
-          {
-            id: 'btn_view_more_businesses',
-            title: '📋 View More Businesses',
-            description: `See ${organicListings.length} other verified sellers for this item`,
-          },
-        ],
-      });
-    }
-  } else {
-    // SCENARIO: Organic Matches Only
-    const top10 = organicMatches.slice(0, 10);
-    previewMsg = `🔍 *Businesses matching "${cleanProduct}"${locNotice}:*\n\n`;
-
-    for (let i = 0; i < top10.length; i++) {
-      const v = top10[i];
-      const priceDisplay = v.price || 'Market Rate';
-      previewMsg += `${i + 1}. *${v.businessName}* — ${v.product} (${priceDisplay})\n\n`;
-    }
-
-    previewMsg +=
-      `────────────────────\n` +
-      `💡 *How to select:*\n` +
-      `• Tap *"Select Vendor"* below, OR\n` +
-      `• Reply with the number or business name`;
-
+  if (organicInPrimary.length > 0) {
     menuSections.push({
       title: 'Verified Vendors',
-      rows: top10.map((v, idx) => ({
-        id: `connect_biz_${v.id}`,
-        title: `${idx + 1}. ${v.businessName}`.substring(0, 24),
-        description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
-      })),
+      rows: organicInPrimary.map((v) => {
+        const fullIdx = primaryDisplay.findIndex(p => p.id === v.id) + 1;
+        return {
+          id: `connect_biz_${v.id}`,
+          title: `${fullIdx}. ${v.businessName}`.substring(0, 24),
+          description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
+        };
+      }),
     });
+  }
 
-    if (organicMatches.length > 10) {
-      menuSections.push({
-        title: '⚡ More Options',
-        rows: [
-          {
-            id: 'btn_next_10_vendors',
-            title: '➡️ Next 10 Vendors',
-            description: `View remaining (${organicMatches.length - 10} more sellers)`,
-          },
-        ],
+  // If fewer than 10 total vendors are displayed, optionally fill remaining slots with quick action rows
+  const currentTotalRows = spotlightInPrimary.length + organicInPrimary.length;
+  const remainingSlots = 10 - currentTotalRows;
+
+  if (remainingSlots > 0) {
+    const quickRows: Array<{ id: string; title: string; description?: string }> = [];
+    if (prioritizedListings.length > 10) {
+      quickRows.push({
+        id: 'btn_next_10_vendors',
+        title: '➡️ Next 10 Vendors',
+        description: `View remaining (${prioritizedListings.length - 10} more sellers)`,
       });
     }
+    quickRows.push({
+      id: 'btn_find_product',
+      title: '🔍 New Search',
+      description: 'Search for a different product',
+    });
+    quickRows.push({
+      id: 'btn_home',
+      title: '🏠 Main Menu',
+      description: 'Return to Floate home menu',
+    });
+
+    menuSections.push({
+      title: '⚡ Quick Actions',
+      rows: quickRows.slice(0, remainingSlots),
+    });
   }
 
   await sendWhatsAppMessage(toPhone, previewMsg, {
