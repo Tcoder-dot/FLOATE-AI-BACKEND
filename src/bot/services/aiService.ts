@@ -58,7 +58,73 @@ export interface ParsedCommerceQuery {
   inferredCategories?: string[]; // Tightly-related categories/services inferred by AI, e.g. ["Legal Services", "Legal Consultation", "Attorney", "Law Firm"]
   itemType?: 'product' | 'service'; // Gemini's judgment on whether the item is a product or service
   isRegistrationRequest?: boolean;
+  isConversational?: boolean; // True if user is greeting, asking how are you, praising, or asking vague chat
+  conversationalReply?: string; // Natural human response asking "how can I help you today?"
   friendlyAck?: string;
+}
+
+/**
+ * Fast deterministic conversational intent classifier for greetings, pleasantries, compliments, and identity questions.
+ */
+export function getConversationalIntent(rawText: string, senderName?: string): { isConversational: boolean; replyText?: string } | null {
+  const text = rawText.toLowerCase().trim();
+  const clean = text.replace(/[^a-z0-9 _]+/g, '').replace(/\s+/g, ' ');
+  const name = senderName && senderName !== 'Customer' ? ` ${senderName}` : '';
+
+  // 1. "How are you" / "How are you doing" / "How is your day" / "How far"
+  if (
+    /^(hello|hi|hey)?\s*(floate\s*)?(how (are|r) (you|u)|how (are|r) (you|u) doing|how is your day|hows your day|how is everything|how body|how you dey|how things|hope (you are|youre|all is) (good|fine|well|great)|what'?s up|wassup)(\s*floate)?$/i.test(clean) ||
+    /\b(how are you doing today|how are you today|how are you|how is your day going|hope your day is going well)\b/i.test(clean)
+  ) {
+    return {
+      isConversational: true,
+      replyText: `👋 Hello${name}! 😌 I'm doing very well, thank you for asking!\n\nHow can I help you today? What would you like to shop for?`,
+    };
+  }
+
+  // 2. Compliments / Appreciation ("You're doing a nice job", "Well done", "Thank you")
+  if (
+    /\b(you('?re| are) doing (a )?(nice|great|good|wonderful|amazing) job|nice job|great job|good job|well done|you are doing great|thank you so much|thank you|thanks a lot|appreciate your help|appreciate you)\b/i.test(clean) ||
+    /^(thank you|thanks|thanks floate|thank you floate|well done|nice one|good job|great work)$/i.test(clean)
+  ) {
+    return {
+      isConversational: true,
+      replyText: `Thank you so much${name}! 😌 Glad I could be of help.\n\nHow can I assist you with your shopping today?`,
+    };
+  }
+
+  // 3. Identity & About ("Who are you", "What is Floate", "What do you do")
+  if (
+    /^(who (are|r) (you|u)|what is floate|what do you do|what can you do|how does (this|floate) work|introduce yourself)(\s+floate)?$/i.test(clean)
+  ) {
+    return {
+      isConversational: true,
+      replyText: `I am Floate, your personal shopping assistant connecting you directly with verified Nigerian merchants across Lagos, Onitsha, Aba, Abuja, Kano, and nationwide! 😌\n\nWhat product, item, or service would you like to find today?`,
+    };
+  }
+
+  // 4. Pure Greetings ("Hello floate", "Hi", "Good morning", "Good afternoon", "Good evening")
+  if (
+    /^(hello|hi|hey|good morning|good afternoon|good evening|good day|greetings|start)(\s+(floate|flote|there|ai|bot))?$/i.test(clean) ||
+    /^(hello floate|hello_floate|hellofloate|hi floate|hi_floate|hifloate|good morning floate|good afternoon floate|good evening floate)$/i.test(clean)
+  ) {
+    return {
+      isConversational: true,
+      replyText: `👋 Hello${name} 😌\n\nWhat would you like to shop for today?\nChoose an option below:`,
+    };
+  }
+
+  // 5. Vague Shopping Statements ("I want to buy something", "Help me shop", "I want to buy")
+  if (
+    /^(i want to (buy|shop|get)|i need to (buy|shop|get)|help me (buy|shop|find)|what can i buy|show me (things|products|items)|i want to buy something|i want to shop)$/i.test(clean)
+  ) {
+    return {
+      isConversational: true,
+      replyText: `I'd love to help you find that${name}! 😌\n\nWhat specific product, item, or service are you looking for? You can also mention your budget or city (e.g. \`Solar battery in Alaba\` or \`Men corporate shoes in Onitsha\`).`,
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -221,12 +287,14 @@ The user message may be in English, Nigerian Pidgin, Yoruba, or Igbo.
 User message: "${userQuery}"
 
 Task: Extract structured details:
-1. "cleanProduct": The clean main product or service name ONLY (e.g. "Phone", "Laptop", "Lawyer", "Video Editor", "Leather Slippers"). Strip out conversational noise like "I want to buy", "I need a", "looking for someone to".
-2. "maxPriceNaira": Maximum budget in Nigerian Naira as a number (e.g., "200k" -> 200000, "5k" -> 5000, "1.5m" -> 1500000). Return null if no budget mentioned.
-3. "buyerLocation": The BUYER's own location if mentioned (e.g. "my location is Agbani", "I stay in Agbani" -> "Agbani").
-4. "targetSellerLocation": The required SELLER location (State, City, or Market Area) if user mentioned a seller location or location preference (e.g., "seller in Enugu", "in Onitsha", "from Lagos", "in Agbani", "in Imo"). If user only gave their own location, set targetSellerLocation to null.
-5. "category": Broad product or service category (e.g. "Phones & Accessories", "Computers", "Legal Services", "Media & Video Production", "Footwear", "Clothing").
-6. "inferredCategories": An array of 3 to 6 tightly-related business category names, service types, or synonym terms that represent businesses capable of fulfilling this request.
+1. "isConversational": true if this message is a greeting, pleasantry, compliment, "how are you" question, or general conversational chit-chat rather than a search for a specific product or service to buy.
+2. "conversationalReply": If isConversational is true, provide a warm, natural 1-2 sentence response greeting them, acknowledging their question or compliment politely, and asking "How can I help you today? What would you like to shop for?" (in natural Nigerian English).
+3. "cleanProduct": The clean main product or service name ONLY (e.g. "Phone", "Laptop", "Lawyer", "Video Editor", "Leather Slippers"). Strip out conversational noise like "I want to buy", "I need a", "looking for someone to". If isConversational is true and no item was mentioned, set to null.
+4. "maxPriceNaira": Maximum budget in Nigerian Naira as a number (e.g., "200k" -> 200000, "5k" -> 5000, "1.5m" -> 1500000). Return null if no budget mentioned.
+5. "buyerLocation": The BUYER's own location if mentioned (e.g. "my location is Agbani", "I stay in Agbani" -> "Agbani").
+6. "targetSellerLocation": The required SELLER location (State, City, or Market Area) if user mentioned a seller location or location preference (e.g., "seller in Enugu", "in Onitsha", "from Lagos", "in Agbani", "in Imo"). If user only gave their own location, set targetSellerLocation to null.
+7. "category": Broad product or service category (e.g. "Phones & Accessories", "Computers", "Legal Services", "Media & Video Production", "Footwear", "Clothing").
+8. "inferredCategories": An array of 3 to 6 tightly-related business category names, service types, or synonym terms that represent businesses capable of fulfilling this request.
    Examples:
    - "I need a lawyer" -> ["Legal Services", "Legal Consultation", "Attorney", "Law Firm", "Lawyer", "Legal Advocate"]
    - "someone to edit my videos" -> ["Video Editor", "Video Editing Services", "Videographer", "Media Production", "Content Creation"]
@@ -234,11 +302,13 @@ Task: Extract structured details:
    - "catering for wedding" -> ["Catering Services", "Caterer", "Event Catering", "Food Services"]
    - "leather slippers" -> ["Footwear", "Leather Slippers", "Shoes", "Plaited Slippers", "Sandals"]
    Do NOT include vague/overly broad words like "Business", "Services", "Shop", "General", "Other".
-7. "itemType": Either "product" or "service". Determine whether the clean item requested represents a physical product (e.g. "Phone", "Cloth", "Shoes", "Generator") or a service/profession to be hired or booked (e.g. "Lawyer", "Video Editor", "Mechanic", "Catering", "Graphic Designer", "Tutor", "Consultant", "Photographer").
-8. "isRegistrationRequest": true ONLY if user wants to register as a business/seller.
+9. "itemType": Either "product" or "service". Determine whether the clean item requested represents a physical product (e.g. "Phone", "Cloth", "Shoes", "Generator") or a service/profession to be hired or booked (e.g. "Lawyer", "Video Editor", "Mechanic", "Catering", "Graphic Designer", "Tutor", "Consultant", "Photographer").
+10. "isRegistrationRequest": true ONLY if user wants to register as a business/seller.
 
 Return ONLY valid JSON format like:
 {
+  "isConversational": false,
+  "conversationalReply": null,
   "cleanProduct": "Lawyer",
   "maxPriceNaira": null,
   "buyerLocation": null,
@@ -269,6 +339,8 @@ Return ONLY valid JSON format like:
         inferredCategories: inferredCats.length > 0 ? inferredCats : [json.cleanProduct || userQuery, ...(json.category ? [json.category] : [])],
         itemType: parsedItemType,
         isRegistrationRequest: Boolean(json.isRegistrationRequest),
+        isConversational: Boolean(json.isConversational),
+        conversationalReply: json.conversationalReply || undefined,
         friendlyAck: `Connecting you to a verified seller for ${json.cleanProduct || 'items'}...`,
       };
     } catch (err) {

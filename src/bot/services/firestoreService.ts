@@ -514,12 +514,46 @@ export class FirestoreService {
     });
   }
 
+  private seenSaveTipPhones = new Set<string>();
+
   public async hasUserSeenSaveTip(userId: string | number): Promise<boolean> {
+    const clean = String(userId).replace(/\D/g, '');
+    if (!clean) return false;
+    if (this.seenSaveTipPhones.has(clean)) return true;
+
+    // Check in user_metadata first for persistence across session resets
+    try {
+      const metaDoc = await getDoc(doc(db, 'user_metadata', clean));
+      if (metaDoc.exists() && metaDoc.data()?.hasSeenSaveTip === true) {
+        this.seenSaveTipPhones.add(clean);
+        return true;
+      }
+    } catch (e) {
+      // ignore
+    }
+
     const sess = await this.getUserSession(userId);
-    return sess.hasSeenSaveTip === true;
+    if (sess.hasSeenSaveTip === true) {
+      this.seenSaveTipPhones.add(clean);
+      return true;
+    }
+    return false;
   }
 
   public async markUserSeenSaveTip(userId: string | number): Promise<void> {
+    const clean = String(userId).replace(/\D/g, '');
+    if (!clean) return;
+    this.seenSaveTipPhones.add(clean);
+
+    try {
+      await setDoc(doc(db, 'user_metadata', clean), {
+        hasSeenSaveTip: true,
+        lastGreetingAt: new Date().toISOString(),
+      }, { merge: true });
+    } catch (e) {
+      // ignore
+    }
+
     await this.setUserSession(userId, { hasSeenSaveTip: true });
   }
 

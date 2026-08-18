@@ -6,6 +6,7 @@ import {
   parseShoppingQuery,
   transcribeAndAnalyzeAudio,
   validateSelfieWithGeminiVision,
+  getConversationalIntent,
 } from './aiService.js';
 import {
   getWhatsAppSession,
@@ -115,6 +116,29 @@ export async function sendWhatsAppMessage(
   }
   // 2. Native Slide-Up List Menu
   else if (options?.listMenu && options.listMenu.sections.length > 0) {
+    let totalRowsCount = 0;
+    const clampedSections: Array<{ title: string; rows: Array<{ id: string; title: string; description?: string }> }> = [];
+
+    for (const sec of options.listMenu.sections) {
+      if (totalRowsCount >= 10) break;
+      const remainingSlots = 10 - totalRowsCount;
+      const validRows = sec.rows.slice(0, remainingSlots).map((r) => ({
+        id: r.id.substring(0, 200),
+        title: (r.title || 'Option').substring(0, 24),
+        description: r.description ? r.description.substring(0, 72) : undefined,
+      }));
+
+      if (validRows.length > 0) {
+        clampedSections.push({
+          title: (sec.title || 'Options').substring(0, 24),
+          rows: validRows,
+        });
+        totalRowsCount += validRows.length;
+      }
+    }
+
+    const safeBody = messageText.length > 1020 ? messageText.substring(0, 1017) + '...' : messageText;
+
     payload = {
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
@@ -124,21 +148,14 @@ export async function sendWhatsAppMessage(
         type: 'list',
         header: {
           type: 'text',
-          text: options.listMenu.title || 'FLOATE Verified Vendors',
+          text: (options.listMenu.title || 'FLOATE Verified Vendors').substring(0, 60),
         },
         body: {
-          text: messageText,
+          text: safeBody,
         },
         action: {
-          button: options.listMenu.buttonText.substring(0, 20),
-          sections: options.listMenu.sections.map((sec) => ({
-            title: sec.title.substring(0, 24),
-            rows: sec.rows.slice(0, 10).map((r) => ({
-              id: r.id.substring(0, 200),
-              title: r.title.substring(0, 24),
-              description: r.description ? r.description.substring(0, 72) : undefined,
-            })),
-          })),
+          button: (options.listMenu.buttonText || 'Select Vendor').substring(0, 20),
+          sections: clampedSections,
         },
       },
     };
@@ -528,12 +545,48 @@ export async function processMasterWhatsAppEngine(params: {
     return;
   }
 
-  // 2. Welcome / Greeting / HELLO FLOATE Intent Trigger
-  if (/^(hello floate|hello_floate|hellofloate|hi floate|hi_floate|hifloate|hi|hello|hey|good morning|good afternoon|good evening|start|btn_greeting|btn_home)$/i.test(cleanLower)) {
+  // 2. Conversational Intent & Pleasantries Interceptor (greetings, "how are you", compliments, identity)
+  const convIntent = getConversationalIntent(text, senderName);
+  if (convIntent && convIntent.isConversational) {
     resetWhatsAppSession(senderPhone);
     await firestoreDb.resetUserSession(senderPhone);
-    await sendWelcomeGreeting(senderPhone, senderName);
-    return;
+
+    const alreadySeenTip = await firestoreDb.hasUserSeenSaveTip(senderPhone);
+    const name = senderName && senderName !== 'Customer' ? senderName : '';
+    const greeting = name ? `👋 Hello ${name} 😌` : `👋 Hello 😌`;
+
+    if (!alreadySeenTip) {
+      // First-time contact greeting
+      const msg =
+        `${greeting}\n\n` +
+        `I'm here to help you find verified vendors, products, and services across Nigeria.\n\n` +
+        `💡 *Tip:* Save this number as *FLOATE* so you can easily search items and message verified sellers anytime!\n\n` +
+        `What would you like to shop for today?\n` +
+        `Choose an option below:`;
+
+      updateWhatsAppSession(senderPhone, { hasSeenSaveTip: true });
+      await firestoreDb.markUserSeenSaveTip(senderPhone);
+
+      await sendWhatsAppMessage(senderPhone, msg, {
+        quickReplies: [
+          { id: 'btn_find_product', title: '🔍 Find a Product' },
+          { id: 'btn_browse_markets', title: '📍 Browse Markets' },
+          { id: 'btn_for_businesses', title: '🏪 For Businesses' },
+        ],
+      });
+      return;
+    } else {
+      // Returning user conversational reply (natural, warm, asks how to help without tip)
+      const replyMsg = convIntent.replyText || `${greeting}\n\nWhat would you like to shop for today?\nChoose an option below:`;
+      await sendWhatsAppMessage(senderPhone, replyMsg, {
+        quickReplies: [
+          { id: 'btn_find_product', title: '🔍 Find a Product' },
+          { id: 'btn_browse_markets', title: '📍 Browse Markets' },
+          { id: 'btn_for_businesses', title: '🏪 For Businesses' },
+        ],
+      });
+      return;
+    }
   }
 
   // 3. Deep-Linked Register Business / Vendor Hub / Merchant Portal Trigger
@@ -984,6 +1037,19 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
     parsed = { searchKeywords: queryText, targetSellerLocation: location };
   }
 
+  // Intercept any conversational fallback detected by AI
+  if (parsed.isConversational) {
+    const reply = parsed.conversationalReply || `👋 Hello 😌\n\nWhat would you like to shop for today?\nChoose an option below:`;
+    await sendWhatsAppMessage(toPhone, reply, {
+      quickReplies: [
+        { id: 'btn_find_product', title: '🔍 Find a Product' },
+        { id: 'btn_browse_markets', title: '📍 Browse Markets' },
+        { id: 'btn_for_businesses', title: '🏪 For Businesses' },
+      ],
+    });
+    return;
+  }
+
   const cleanProduct = parsed.searchKeywords || queryText;
   const targetLoc = location || parsed.targetSellerLocation;
 
@@ -1148,7 +1214,7 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
     `• Reply with the number (e.g. \`1\`, \`2\`, \`3\`) or business name`;
 
   // Build Native Slide-Up List Menu
-  const menuSections: any[] = [];
+  const menuSections: WhatsAppListSection[] = [];
 
   if (spotlightInPrimary.length > 0) {
     menuSections.push({
@@ -1178,47 +1244,33 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
     });
   }
 
-  if (prioritizedListings.length > 10) {
-    menuSections.push({
-      title: '⚡ More Options',
-      rows: [
-        {
-          id: 'btn_next_10_vendors',
-          title: '➡️ Next 10 Vendors',
-          description: `View remaining (${prioritizedListings.length - 10} more sellers)`,
-        },
-        {
-          id: 'btn_find_product',
-          title: '🔍 New Search',
-          description: 'Search for a different product or item',
-        },
-        {
-          id: 'btn_home',
-          title: '🏠 Main Menu',
-          description: 'Return to Floate home menu',
-        },
-      ],
+  // If fewer than 10 total vendors are displayed, optionally fill remaining slots with quick action rows
+  const currentTotalRows = spotlightInPrimary.length + organicInPrimary.length;
+  const remainingSlots = 10 - currentTotalRows;
+
+  if (remainingSlots > 0) {
+    const quickRows: Array<{ id: string; title: string; description?: string }> = [];
+    if (prioritizedListings.length > 10) {
+      quickRows.push({
+        id: 'btn_next_10_vendors',
+        title: '➡️ Next 10 Vendors',
+        description: `View remaining (${prioritizedListings.length - 10} more sellers)`,
+      });
+    }
+    quickRows.push({
+      id: 'btn_find_product',
+      title: '🔍 New Search',
+      description: 'Search for a different product',
     });
-  } else {
+    quickRows.push({
+      id: 'btn_home',
+      title: '🏠 Main Menu',
+      description: 'Return to Floate home menu',
+    });
+
     menuSections.push({
       title: '⚡ Quick Actions',
-      rows: [
-        {
-          id: 'btn_find_product',
-          title: '🔍 New Search',
-          description: 'Search for a different product or item',
-        },
-        {
-          id: 'btn_browse_markets',
-          title: '📍 Browse Markets',
-          description: 'Explore Balogun, Alaba, Onitsha, Aba',
-        },
-        {
-          id: 'btn_home',
-          title: '🏠 Main Menu',
-          description: 'Return to Floate home menu',
-        },
-      ],
+      rows: quickRows.slice(0, remainingSlots),
     });
   }
 
@@ -1286,31 +1338,18 @@ async function handleShowNext10Vendors(toPhone: string, senderName: string, sess
     `• Tap *"Select Vendor"* below, OR\n` +
     `• Reply with the number or business name`;
 
-  const listRows = next10.map((v: any, idx: number) => ({
+  const listRows = next10.slice(0, 10).map((v: any, idx: number) => ({
     id: `connect_biz_${v.id}`,
     title: `${startIdx + idx + 1}. ${v.businessName}`.substring(0, 24),
     description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
   }));
 
-  const menuSections: any[] = [
+  const menuSections: WhatsAppListSection[] = [
     {
       title: `Verified Vendors (${startIdx + 1}–${startIdx + next10.length})`,
       rows: listRows,
     },
   ];
-
-  if (search.allMatchingListings.length > startIdx + next10.length) {
-    menuSections.push({
-      title: '⚡ More Options',
-      rows: [
-        {
-          id: 'btn_next_10_vendors',
-          title: '➡️ Next 10 Vendors',
-          description: `View next batch of sellers`,
-        },
-      ],
-    });
-  }
 
   await sendWhatsAppMessage(toPhone, previewMsg, {
     listMenu: {
