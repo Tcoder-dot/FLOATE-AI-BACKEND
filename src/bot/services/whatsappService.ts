@@ -540,9 +540,27 @@ export async function processMasterWhatsAppEngine(params: {
     return;
   }
 
-  // 2. Conversational Intent & Pleasantries Interceptor (greetings, "how are you", compliments, identity, support)
+  // 2. Conversational Intent & Pleasantries Interceptor (greetings, "how are you", compliments, identity, support, reports)
   const convIntent = getConversationalIntent(text, senderName);
   if (convIntent && convIntent.isConversational) {
+    if (convIntent.isReportRequest) {
+      updateWhatsAppSession(senderPhone, {
+        state: 'REPORT_PROCESS',
+        reportDraft: {
+          step: 'AWAITING_DETAILS',
+          vendorId: session.activeVendorId || '',
+          vendorName: session.activeVendorName || '',
+          vendorPhone: session.activeVendorPhone || '',
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      await sendWhatsAppMessage(
+        senderPhone,
+        convIntent.replyText || 'I am sorry to hear you are having an issue with a vendor. Please tell me what happened, what the vendor did, and the vendor\'s name or phone number so we can look into it for you.'
+      );
+      return;
+    }
+
     resetWhatsAppSession(senderPhone);
     await firestoreDb.resetUserSession(senderPhone);
 
@@ -727,33 +745,35 @@ export async function processMasterWhatsAppEngine(params: {
   }
 
   // 5. Report Vendor Flow Trigger
-  if (text.startsWith('report_vendor_') || text === 'btn_report_vendor' || cleanLower === 'report') {
+  if (text.startsWith('report_vendor_') || text === 'btn_report_vendor' || cleanLower === 'report' || cleanLower === 'report vendor') {
     const targetVendorId = text.startsWith('report_vendor_') ? text.replace('report_vendor_', '').trim() : '';
     const vendorListing = targetVendorId ? sheetsDb.getListingById(targetVendorId) : null;
+    const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
+    const prefix = name ? `Hello ${name}, ` : 'Hello, ';
 
     updateWhatsAppSession(senderPhone, {
       state: 'REPORT_PROCESS',
       reportDraft: {
         step: 'AWAITING_DETAILS',
         vendorId: targetVendorId || session.activeVendorId || '',
-        vendorName: vendorListing?.businessName || session.activeVendorName || 'Unknown Vendor',
+        vendorName: vendorListing?.businessName || session.activeVendorName || '',
         vendorPhone: vendorListing?.whatsapp || session.activeVendorPhone || '',
         updatedAt: new Date().toISOString(),
       },
     });
 
+    const vendorMention = vendorListing?.businessName || session.activeVendorName ? ` regarding ${vendorListing?.businessName || session.activeVendorName}` : '';
     await sendWhatsAppMessage(
       senderPhone,
-      `⚠️ *Report a Vendor / Dispute*\n\n` +
-      `Trust and buyer protection are our top priorities.\n\n` +
-      `Please reply with a brief description of the issue or dispute with *${vendorListing?.businessName || session.activeVendorName || 'the seller'}*:\n` +
-      `_(e.g., Fake product, Wrong price quoted, Refused inspection, Suspicious behavior)_`
+      `${prefix}I am sorry to hear you are having an issue${vendorMention}. Please tell me what happened, what the vendor did, and the vendor's name or phone number so we can look into it for you.`
     );
     return;
   }
 
   // Handle active REPORT_PROCESS
   if (session.state === 'REPORT_PROCESS' && session.reportDraft?.step === 'AWAITING_DETAILS') {
+    const isFraudOrScam = /\b(scam|scammer|fraud|fake|cheat|cheated|stole|stolen|thief|money|swindled|refused to deliver|paid but|never sent|blocked me|fake receipt|impersonat)\b/i.test(text);
+
     const reportId = await submitVendorReport({
       reporterPhone: senderPhone,
       reporterName: senderName,
@@ -761,22 +781,24 @@ export async function processMasterWhatsAppEngine(params: {
       vendorName: session.reportDraft.vendorName,
       vendorPhone: session.reportDraft.vendorPhone,
       reason: text,
+      isFraudOrScam,
     });
 
     resetWhatsAppSession(senderPhone);
-    await sendWhatsAppMessage(
-      senderPhone,
-      `✅ *Report Received (Ref: \`${reportId}\`)*\n\n` +
-      `Thank you for keeping FLOATE safe. Our verification and compliance team has been alerted and will investigate this vendor immediately.\n\n` +
-      `What else would you like to search for today?`,
-      {
-        quickReplies: [
-          { id: 'btn_find_product', title: '🔍 Find a Product' },
-          { id: 'btn_browse_markets', title: '📍 Browse Markets' },
-          { id: 'btn_home', title: '🏠 Main Menu' },
-        ],
-      }
-    );
+    const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
+    const prefix = name ? `Hello ${name}, ` : 'Hello, ';
+
+    if (isFraudOrScam) {
+      await sendWhatsAppMessage(
+        senderPhone,
+        `${prefix}I completely understand how frustrating and concerning this is. We take issues like this very seriously. Your report has been escalated directly to the Floate Security Team to handle, and they will review the details and reach out to you on WhatsApp. Everything will be thoroughly investigated and addressed.`
+      );
+    } else {
+      await sendWhatsAppMessage(
+        senderPhone,
+        `${prefix}I am very sorry for the inconvenience this has caused you. We have received your report and our management team will investigate this vendor thoroughly to ensure this is resolved. Thank you for bringing this to our attention.`
+      );
+    }
     return;
   }
 

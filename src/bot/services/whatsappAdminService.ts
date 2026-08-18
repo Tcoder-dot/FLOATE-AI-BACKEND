@@ -10,6 +10,7 @@ export interface VendorReport {
   vendorName?: string;
   vendorPhone?: string;
   reason: string;
+  isFraudOrScam?: boolean;
   timestamp: string;
 }
 
@@ -21,20 +22,25 @@ export async function submitVendorReport(report: Omit<VendorReport, 'id' | 'time
   const reportId = `REP-${Date.now()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
   const timestamp = new Date().toISOString();
 
-  console.log(`[Vendor Report] ⚠️ New report submitted by +${report.reporterPhone} against "${report.vendorName || report.vendorId || 'Unknown'}" (Reason: ${report.reason})`);
+  console.log(`[Vendor Report] ⚠️ New report submitted by +${report.reporterPhone} against "${report.vendorName || report.vendorId || 'Unknown'}" (Fraud/Scam: ${!!report.isFraudOrScam}, Reason: ${report.reason})`);
 
   // 1. Alert Admin on WhatsApp if configured
   const adminPhone = process.env.ADMIN_WHATSAPP_PHONE || config.adminWhatsAppPhone;
   if (adminPhone) {
+    const reportTypeHeader = report.isFraudOrScam
+      ? `🚨 *URGENT: FRAUD / SCAM REPORT (SECURITY ESCALATION)*`
+      : `⚠️ *NEW VENDOR DISPUTE / COMPLAINT REPORT*`;
+
     const adminAlert =
-      `🚨 *URGENT: New Vendor Dispute / Report Received*\n\n` +
+      `${reportTypeHeader}\n\n` +
       `🆔 *Report ID:* \`${reportId}\`\n` +
-      `👤 *Reported by:* +${report.reporterPhone} (${report.reporterName})\n` +
+      `👤 *Reporter:* +${report.reporterPhone} (${report.reporterName})\n` +
       `🏬 *Reported Vendor:* ${report.vendorName || 'N/A'}\n` +
       `📱 *Vendor Phone:* ${report.vendorPhone || 'N/A'}\n` +
       `🏷️ *Vendor ID:* \`${report.vendorId || 'N/A'}\`\n\n` +
-      `📝 *Reason / Details:*\n"${report.reason}"\n\n` +
-      `⏰ *Time:* ${new Date().toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })}`;
+      `📝 *Customer Complaint / Details:*\n"${report.reason}"\n\n` +
+      `⏰ *Time:* ${new Date().toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })}\n\n` +
+      `⚡ *Action Required:* Please review and reach out to the reporter at +${report.reporterPhone} on WhatsApp.`;
 
     await sendWhatsAppMessage(adminPhone, adminAlert).catch((err) => {
       console.warn('[Admin Report Alert Error]:', err?.message || err);
@@ -48,12 +54,13 @@ export async function submitVendorReport(report: Omit<VendorReport, 'id' | 'time
       const { getBotInstance } = await import('../bot.js');
       const bot = getBotInstance();
       if (bot && bot.token && !bot.token.includes('DummyToken')) {
+        const title = report.isFraudOrScam ? `🚨 *URGENT: FRAUD / SCAM REPORT*` : `⚠️ *NEW VENDOR COMPLAINT*`;
         await bot.api.sendMessage(
           adminTelegramId,
-          `🚨 *URGENT: New WhatsApp Vendor Report Received*\n\n` +
+          `${title}\n\n` +
           `🆔 *Report ID:* \`${reportId}\`\n` +
-          `👤 *Reported by:* +${report.reporterPhone} (${report.reporterName})\n` +
-          `🏬 *Reported Vendor:* ${report.vendorName || 'N/A'}\n` +
+          `👤 *Reporter:* +${report.reporterPhone} (${report.reporterName})\n` +
+          `🏬 *Vendor:* ${report.vendorName || 'N/A'}\n` +
           `📱 *Vendor Phone:* ${report.vendorPhone || 'N/A'}\n` +
           `📝 *Reason:* ${report.reason}`,
           { parse_mode: 'Markdown' }

@@ -63,27 +63,45 @@ export interface ParsedCommerceQuery {
   friendlyAck?: string;
 }
 
+export interface ConversationalIntentResult {
+  isConversational: boolean;
+  isReportRequest?: boolean;
+  replyText?: string;
+}
+
 /**
- * Fast deterministic conversational intent classifier for greetings, pleasantries, compliments, identity, and support questions.
+ * Fast deterministic conversational intent classifier for greetings, pleasantries, compliments, identity, and support/reporting questions.
  */
-export function getConversationalIntent(rawText: string, senderName?: string): { isConversational: boolean; replyText?: string } | null {
+export function getConversationalIntent(rawText: string, senderName?: string): ConversationalIntentResult | null {
   const text = rawText.toLowerCase().trim();
   const clean = text.replace(/[^a-z0-9 _]+/g, '').replace(/\s+/g, ' ');
   const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
   const prefix = name ? `Hello ${name}, ` : 'Hello, ';
 
-  // 1. Support / Report a business / Customer care inquiry
+  // 1. Report a vendor / Scam / Fraud / Complaint / Dispute
   if (
-    /\b(support|customer care|customer service|help desk|contact support|contact us|report|report a business|report shop|report seller|report fraud|scam|fraud|complaint)\b/i.test(clean) ||
-    /^(support|help|report|customer care|complaint)$/i.test(clean)
+    /\b(report\s+(a\s+)?(vendor|seller|shop|business|store|merchant)|report\s+them|report\s+him|report\s+her|i want to report|scam|fraud|scammer|fake vendor|fake seller|scammed|cheated|stole my money|stolen|vendor problem|vendor issue|dispute|complaint)\b/i.test(clean) ||
+    /^(report|report vendor|report a vendor|report business|report scam|scam|fraud|complaint)$/i.test(clean)
   ) {
     return {
       isConversational: true,
-      replyText: `${prefix}for customer support or to report a business, please email us directly at support@floate.xyz. How else can I assist you today?`,
+      isReportRequest: true,
+      replyText: `${prefix}I am sorry to hear you are having an issue. Please tell me what happened, what the vendor did, and the vendor's name or phone number so we can look into it for you.`,
     };
   }
 
-  // 2. "How are you" / "How are you doing" / "How is your day" / "How far"
+  // 2. General Support / Customer Care Inquiries
+  if (
+    /\b(customer care|customer service|help desk|contact support|contact us|contact email|support email)\b/i.test(clean) ||
+    /^(support|help|customer care)$/i.test(clean)
+  ) {
+    return {
+      isConversational: true,
+      replyText: `${prefix}for general inquiries you can reach us at support@floate.xyz, or if you need to report a vendor or issue, please describe what happened so we can assist you.`,
+    };
+  }
+
+  // 3. "How are you" / "How are you doing" / "How is your day" / "How far"
   if (
     /^(hello|hi|hey)?\s*(floate\s*)?(how (are|r) (you|u)|how (are|r) (you|u) doing|how is your day|hows your day|how is everything|how body|how you dey|how things|hope (you are|youre|all is) (good|fine|well|great)|what'?s up|wassup)(\s*floate)?$/i.test(clean) ||
     /\b(how are you doing today|how are you today|how are you|how is your day going|hope your day is going well)\b/i.test(clean)
@@ -94,7 +112,7 @@ export function getConversationalIntent(rawText: string, senderName?: string): {
     };
   }
 
-  // 3. Compliments / Appreciation ("You're doing a nice job", "Well done", "Thank you")
+  // 4. Compliments / Appreciation ("You're doing a nice job", "Well done", "Thank you")
   if (
     /\b(you('?re| are) doing (a )?(nice|great|good|wonderful|amazing) job|nice job|great job|good job|well done|you are doing great|thank you so much|thank you|thanks a lot|appreciate your help|appreciate you)\b/i.test(clean) ||
     /^(thank you|thanks|thanks floate|thank you floate|well done|nice one|good job|great work)$/i.test(clean)
@@ -105,7 +123,7 @@ export function getConversationalIntent(rawText: string, senderName?: string): {
     };
   }
 
-  // 4. Identity & About ("Who are you", "What is Floate", "What do you do")
+  // 5. Identity & About ("Who are you", "What is Floate", "What do you do")
   if (
     /^(who (are|r) (you|u)|what is floate|what do you do|what can you do|how does (this|floate) work|introduce yourself)(\s+floate)?$/i.test(clean)
   ) {
@@ -115,7 +133,7 @@ export function getConversationalIntent(rawText: string, senderName?: string): {
     };
   }
 
-  // 5. Pure Greetings ("Hello floate", "Hi", "Good morning", "Good afternoon", "Good evening")
+  // 6. Pure Greetings ("Hello floate", "Hi", "Good morning", "Good afternoon", "Good evening")
   if (
     /^(hello|hi|hey|good morning|good afternoon|good evening|good day|greetings|start)(\s+(floate|flote|there|ai|bot))?$/i.test(clean) ||
     /^(hello floate|hello_floate|hellofloate|hi floate|hi_floate|hifloate|good morning floate|good afternoon floate|good evening floate)$/i.test(clean)
@@ -126,7 +144,7 @@ export function getConversationalIntent(rawText: string, senderName?: string): {
     };
   }
 
-  // 6. Vague Shopping Statements ("I want to buy something", "Help me shop", "I want to buy")
+  // 7. Vague Shopping Statements ("I want to buy something", "Help me shop", "I want to buy")
   if (
     /^(i want to (buy|shop|get)|i need to (buy|shop|get)|help me (buy|shop|find)|what can i buy|show me (things|products|items)|i want to buy something|i want to shop)$/i.test(clean)
   ) {
