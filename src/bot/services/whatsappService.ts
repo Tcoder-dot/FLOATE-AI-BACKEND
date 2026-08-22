@@ -6,11 +6,20 @@ import {
   parseShoppingQuery,
   transcribeAndAnalyzeAudio,
   validateSelfieWithGeminiVision,
+  classifyInboundIntent,
+  isEndChatIntent,
+  detectMutualAgreement,
+  generateBrandConversationalResponse,
 } from './aiService.js';
 import {
   getWhatsAppSession,
   updateWhatsAppSession,
   resetWhatsAppSession,
+  getActiveRelaySession,
+  saveRelaySession,
+  endRelaySession,
+  RelaySession,
+  RelayMessage,
 } from './whatsappStateManager.js';
 import { submitVendorReport, alertAdminNewVendorRegistration } from './whatsappAdminService.js';
 
@@ -55,6 +64,18 @@ function pushWaLog(msg: string) {
   }
 }
 
+export type WhatsAppOutgoingListener = (toPhone: string, text: string, options?: SendWhatsAppOptions) => void;
+const waOutgoingListeners: WhatsAppOutgoingListener[] = [];
+
+export function addWhatsAppOutgoingListener(listener: WhatsAppOutgoingListener) {
+  waOutgoingListeners.push(listener);
+}
+
+export function removeWhatsAppOutgoingListener(listener: WhatsAppOutgoingListener) {
+  const index = waOutgoingListeners.indexOf(listener);
+  if (index > -1) waOutgoingListeners.splice(index, 1);
+}
+
 /**
  * Sends a message back to a WhatsApp user via Meta's WhatsApp Cloud API
  * Supports standard text, 1-3 interactive buttons, and native slide-up List Menus
@@ -71,10 +92,18 @@ export async function sendWhatsAppMessage(
 
   pushWaLog(`📤 Outgoing request to +${cleanTo}: ${messageText.slice(0, 60)}...`);
 
+  // Broadcast to all outgoing listeners (e.g. simulator and live debugger)
+  waOutgoingListeners.forEach((listener) => {
+    try {
+      listener(cleanTo, messageText, options);
+    } catch (err) {
+      console.warn('[WhatsApp Listener Error]:', err);
+    }
+  });
+
   if (!token || !phoneNumberId) {
-    pushWaLog(`❌ FAILED: Token or Phone Number ID is missing!`);
-    console.warn(`[WhatsApp Send Error] ❌ Missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID.`);
-    return false;
+    pushWaLog(`ℹ️ Meta credentials not active. Message simulated for +${cleanTo}`);
+    return true; // Successfully delivered to simulator/debugger
   }
 
   const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
@@ -96,7 +125,7 @@ export async function sendWhatsAppMessage(
             }
           : undefined,
         body: {
-          text: messageText,
+          text: messageText.substring(0, 1024),
         },
         footer: options.ctaUrl.footerText
           ? {
@@ -113,7 +142,7 @@ export async function sendWhatsAppMessage(
       },
     };
   }
-  // 2. Native Slide-Up List Menu
+  // 2. Native Slide-Up List Menu (Meta requirement: type = "list", required action.button, max 10 rows)
   else if (options?.listMenu && options.listMenu.sections.length > 0) {
     let totalRowsCount = 0;
     const clampedSections: Array<{ title: string; rows: Array<{ id: string; title: string; description?: string }> }> = [];
@@ -147,7 +176,7 @@ export async function sendWhatsAppMessage(
         type: 'list',
         header: {
           type: 'text',
-          text: (options.listMenu.title || 'FLOATE Verified Vendors').substring(0, 60),
+          text: (options.listMenu.title || 'Floate Directory').substring(0, 60),
         },
         body: {
           text: safeBody,
@@ -159,7 +188,7 @@ export async function sendWhatsAppMessage(
       },
     };
   }
-  // 3. Interactive Quick Reply Buttons (Max 3)
+  // 3. Interactive Quick Reply Buttons (Meta requirement: type = "button", max 3 buttons)
   else if (options?.quickReplies && options.quickReplies.length > 0 && options.quickReplies.length <= 3) {
     payload = {
       messaging_product: 'whatsapp',
@@ -169,7 +198,7 @@ export async function sendWhatsAppMessage(
       interactive: {
         type: 'button',
         body: {
-          text: messageText,
+          text: messageText.substring(0, 1024),
         },
         action: {
           buttons: options.quickReplies.map((b) => ({
@@ -183,7 +212,42 @@ export async function sendWhatsAppMessage(
       },
     };
   }
-  // 3. Standard Text Message
+  // 4. Fallback for > 3 quick replies: Auto-convert to Meta Interactive List format
+  else if (options?.quickReplies && options.quickReplies.length > 3) {
+    const listRows = options.quickReplies.slice(0, 10).map((b) => ({
+      id: b.id.substring(0, 200),
+      title: b.title.substring(0, 24),
+    }));
+
+    const safeBody = messageText.length > 1020 ? messageText.substring(0, 1017) + '...' : messageText;
+
+    payload = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: cleanTo,
+      type: 'interactive',
+      interactive: {
+        type: 'list',
+        header: {
+          type: 'text',
+          text: 'Select an Option',
+        },
+        body: {
+          text: safeBody,
+        },
+        action: {
+          button: 'Choose Option',
+          sections: [
+            {
+              title: 'Options',
+              rows: listRows,
+            },
+          ],
+        },
+      },
+    };
+  }
+  // 5. Standard Text Message
   else {
     payload = {
       messaging_product: 'whatsapp',
@@ -488,6 +552,251 @@ export async function handleWhatsAppWebhook(req: express.Request, res: express.R
 }
 
 /**
+ * -------------------------------------------------------------
+ * FLOATE SECURE LINE: ANONYMOUS RELAY ENGINE
+ * -------------------------------------------------------------
+ */
+
+/**
+ * Starts an anonymous Floate Secure Line relay chat between buyer and vendor upon selection.
+ * No qualification questions, no negotiator prompt, straight into the relay chat.
+ * No phone numbers revealed to either side.
+ */
+export async function startFloateSecureLine(buyerPhone: string, buyerName: string, bizId: string) {
+  let listing = sheetsDb.getListingById(bizId);
+  if (!listing) {
+    // Try to get from Firestore
+    const merchantDoc = await firestoreDb.getMerchant(bizId);
+    if (merchantDoc) {
+      listing = {
+        id: merchantDoc.id,
+        businessName: merchantDoc.businessName,
+        ownerFullName: merchantDoc.ownerFullName || '',
+        whatsapp: merchantDoc.whatsapp,
+        city: merchantDoc.city || '',
+        state: merchantDoc.state || '',
+        category: merchantDoc.category || '',
+        product: 'Verified Products',
+        price: 'Best Price',
+        isVerified: merchantDoc.isVerified || false,
+        userId: merchantDoc.userId || '',
+        listingType: 'verified_shop',
+        negotiation: 'Yes',
+        registeredSince: new Date().toISOString(),
+        productCount: 1,
+      };
+    }
+  }
+
+  const bizName = listing?.businessName || 'Verified Vendor';
+  const rawBizPhone = listing?.whatsapp || '';
+  const vendorPhone = normalizePhone(rawBizPhone).replace(/^0/, '234');
+  const cleanBuyerPhone = normalizePhone(buyerPhone).replace(/^0/, '234');
+  const item = listing?.product || 'Items';
+  const price = listing?.price ? `₦${listing.price.replace(/^₦/, '')}` : 'Market Price';
+
+  const sessionId = `relay_${cleanBuyerPhone}_${vendorPhone}_${Date.now()}`;
+
+  const relaySession: RelaySession = {
+    id: sessionId,
+    buyerPhone: cleanBuyerPhone,
+    buyerName: buyerName && buyerName !== 'Customer' ? buyerName : 'Buyer',
+    vendorPhone,
+    vendorName: bizName,
+    vendorId: bizId,
+    item,
+    price,
+    status: 'ACTIVE',
+    messages: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  saveRelaySession(relaySession);
+  await firestoreDb.saveRelaySessionDoc(relaySession);
+
+  // Update Buyer WhatsApp session state
+  updateWhatsAppSession(cleanBuyerPhone, {
+    state: 'RELAY_CHAT',
+    activeRelayId: sessionId,
+    activeVendorId: bizId,
+    activeVendorName: bizName,
+    activeVendorPhone: vendorPhone,
+    activeItem: item,
+  });
+
+  // Update Vendor WhatsApp session state
+  updateWhatsAppSession(vendorPhone, {
+    state: 'RELAY_CHAT',
+    activeRelayId: sessionId,
+    activeBuyerPhone: cleanBuyerPhone,
+  });
+
+  // 1. Send clean starter message to Buyer
+  const buyerGreeting =
+    `🟢 *Floate Secure Line Active*\n\n` +
+    `You are now connected with the seller for *${item}* (*${bizName}*).\n` +
+    `• Your phone number is kept completely private.\n` +
+    `• Type your message to chat directly.\n` +
+    `• Type *end chat* whenever you wish to leave.`;
+
+  await sendWhatsAppMessage(cleanBuyerPhone, buyerGreeting);
+
+  // 2. Send clean alert message to Vendor
+  const vendorGreeting =
+    `🟢 *New Buyer on Floate Secure Line*\n\n` +
+    `A buyer is inquiring about *${item}*.\n` +
+    `• Reply directly to this message to chat with them anonymously.\n` +
+    `• Your phone number is kept private.\n` +
+    `• Type *end chat* to close this session.`;
+
+  await sendWhatsAppMessage(vendorPhone, vendorGreeting);
+}
+
+/**
+ * Handles incoming messages inside an active Floate Secure Line session
+ */
+export async function handleActiveRelayMessage(
+  cleanPhone: string,
+  senderName: string,
+  text: string,
+  activeRelay: RelaySession
+) {
+  const cleanLower = text.toLowerCase().trim().replace(/[^a-z0-9 _]+/g, '').replace(/\s+/g, ' ');
+
+  // 1. Handle SafePay option selection
+  if (
+    text === 'btn_safepay' ||
+    /^(1|safepay|floate safepay|escrow|pay with safepay|use safepay)$/i.test(cleanLower)
+  ) {
+    activeRelay.paymentOptionChosen = 'SAFEPAY';
+    activeRelay.updatedAt = new Date().toISOString();
+    saveRelaySession(activeRelay);
+    await firestoreDb.saveRelaySessionDoc(activeRelay);
+
+    const priceText = activeRelay.agreementDetails?.agreedPrice || activeRelay.price || 'Agreed Price';
+    const itemText = activeRelay.agreementDetails?.item || activeRelay.item;
+
+    const safePayMsg =
+      `🔒 *Floate SafePay Protection*\n\n` +
+      `Floate will hold your payment securely via Flutterwave until *${activeRelay.vendorName}* fulfills your order for *${itemText}*.\n\n` +
+      `💰 *Agreed Amount:* ${priceText}\n` +
+      `📦 *Item:* ${itemText}\n` +
+      `💳 *Payment Link:* https://pay.floate.xyz/safepay/${activeRelay.id}\n\n` +
+      `_Once payment is confirmed, the vendor is instructed to dispatch immediately. Funds are only released to the vendor after you inspect and confirm delivery._`;
+
+    await sendWhatsAppMessage(activeRelay.buyerPhone, safePayMsg);
+
+    // Notify Vendor
+    await sendWhatsAppMessage(
+      activeRelay.vendorPhone,
+      `🔔 *Floate SafePay Initiated*\n\nThe buyer has selected Floate SafePay for *${itemText}* at *${priceText}*. We will alert you once payment is secured in escrow so you can dispatch the order.`
+    );
+    return;
+  }
+
+  // 2. Handle Direct Connect option selection
+  if (
+    text === 'btn_direct_connect' ||
+    /^(2|direct|direct connect|connect directly|share number|give me number|vendor number)$/i.test(cleanLower)
+  ) {
+    activeRelay.paymentOptionChosen = 'DIRECT';
+    activeRelay.status = 'ENDED';
+    activeRelay.updatedAt = new Date().toISOString();
+    endRelaySession(activeRelay.id);
+    await firestoreDb.saveRelaySessionDoc(activeRelay);
+
+    updateWhatsAppSession(activeRelay.buyerPhone, { state: 'IDLE', activeRelayId: undefined });
+    updateWhatsAppSession(activeRelay.vendorPhone, { state: 'IDLE', activeRelayId: undefined });
+
+    const directMsg =
+      `🤝 *Direct Vendor Connection*\n\n` +
+      `Here is the direct contact number for *${activeRelay.vendorName}*:\n` +
+      `📱 *WhatsApp:* +${activeRelay.vendorPhone}\n\n` +
+      `Thank you for using Floate! Please note that Floate is not responsible for transactions or payments conducted directly outside Floate SafePay.`;
+
+    await sendWhatsAppMessage(activeRelay.buyerPhone, directMsg);
+
+    await sendWhatsAppMessage(
+      activeRelay.vendorPhone,
+      `🤝 *Direct Contact Shared*\n\nYour direct WhatsApp number (+${activeRelay.vendorPhone}) has been shared with the buyer for *${activeRelay.item}*.\n\nThank you for using Floate!`
+    );
+    return;
+  }
+
+  // 3. Handle End Chat Intent (Regex + Gemini)
+  const isEnd = await isEndChatIntent(text);
+  if (isEnd) {
+    endRelaySession(activeRelay.id);
+    await firestoreDb.saveRelaySessionDoc({ ...activeRelay, status: 'ENDED', updatedAt: new Date().toISOString() });
+
+    updateWhatsAppSession(activeRelay.buyerPhone, { state: 'IDLE', activeRelayId: undefined });
+    updateWhatsAppSession(activeRelay.vendorPhone, { state: 'IDLE', activeRelayId: undefined });
+
+    const isBuyer = cleanPhone === activeRelay.buyerPhone.replace(/\D/g, '');
+    const senderPhone = isBuyer ? activeRelay.buyerPhone : activeRelay.vendorPhone;
+    const otherPhone = isBuyer ? activeRelay.vendorPhone : activeRelay.buyerPhone;
+
+    await sendWhatsAppMessage(senderPhone, `You have ended the Floate Secure Line chat.`);
+    await sendWhatsAppMessage(otherPhone, `The other party has ended this chat session. Thank you for using Floate Secure Line.`);
+    return;
+  }
+
+  // 4. Clean Message Relay (both directions)
+  const isBuyer = cleanPhone === activeRelay.buyerPhone.replace(/\D/g, '');
+  const senderRole: 'BUYER' | 'VENDOR' = isBuyer ? 'BUYER' : 'VENDOR';
+  const recipientPhone = isBuyer ? activeRelay.vendorPhone : activeRelay.buyerPhone;
+
+  // Append message to transcript
+  const messageObj: RelayMessage = {
+    senderRole,
+    senderPhone: cleanPhone,
+    text,
+    timestamp: new Date().toISOString(),
+  };
+  activeRelay.messages.push(messageObj);
+  activeRelay.updatedAt = new Date().toISOString();
+  saveRelaySession(activeRelay);
+  await firestoreDb.saveRelaySessionDoc(activeRelay);
+
+  // Relay clean message only - no "message relayed" confirmations, no buttons attached to every message
+  await sendWhatsAppMessage(recipientPhone, text);
+
+  // 5. Detect Mutual Agreement using Gemini
+  if (activeRelay.status !== 'AGREEMENT_PENDING' && activeRelay.messages.length >= 2) {
+    try {
+      const agreement = await detectMutualAgreement(activeRelay.messages, activeRelay.item);
+      if (agreement && agreement.hasAgreed) {
+        activeRelay.status = 'AGREEMENT_PENDING';
+        activeRelay.agreementDetails = {
+          item: agreement.item,
+          agreedPrice: agreement.agreedPrice,
+          terms: agreement.terms,
+          detectedAt: new Date().toISOString(),
+        };
+        saveRelaySession(activeRelay);
+        await firestoreDb.saveRelaySessionDoc(activeRelay);
+
+        const termsNote = agreement.terms ? ` (${agreement.terms})` : '';
+        const agreementPrompt =
+          `🎉 *Agreement Detected!*\n\n` +
+          `It looks like you and the seller have agreed on *${agreement.item}* for *${agreement.agreedPrice}*${termsNote}.\n\n` +
+          `Please confirm how you would like to proceed:`;
+
+        await sendWhatsAppMessage(activeRelay.buyerPhone, agreementPrompt, {
+          quickReplies: [
+            { id: 'btn_safepay', title: '🔒 Floate SafePay' },
+            { id: 'btn_direct_connect', title: '🤝 Connect Directly' },
+          ],
+        });
+      }
+    } catch (err) {
+      console.warn('[Gemini Mutual Agreement Detection Warning]:', err);
+    }
+  }
+}
+
+/**
  * MASTER CONVERSATIONAL ENGINE FOR FLOATE ON WHATSAPP
  */
 export async function processMasterWhatsAppEngine(params: {
@@ -501,11 +810,12 @@ export async function processMasterWhatsAppEngine(params: {
 }) {
   const { senderPhone, senderName, imageId, imageMimeType } = params;
   let text = params.text.trim();
-  const session = getWhatsAppSession(senderPhone);
+  const cleanPhone = senderPhone.replace(/\D/g, '');
+  const session = getWhatsAppSession(cleanPhone);
 
   // 1. Process Voice Note if present
   if (params.audioId) {
-    console.log(`[WhatsApp Voice Note] 🎙️ Processing voice note from +${senderPhone}...`);
+    console.log(`[WhatsApp Voice Note] 🎙️ Processing voice note from +${cleanPhone}...`);
     const media = await downloadWhatsAppMedia(params.audioId);
     if (media) {
       try {
@@ -521,7 +831,7 @@ export async function processMasterWhatsAppEngine(params: {
       const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
       const prefix = name ? `Hello ${name}, ` : 'Hello, ';
       await sendWhatsAppMessage(
-        senderPhone,
+        cleanPhone,
         `${prefix}we could not clearly hear your voice note. Please type what product, item, or service you are looking for.`
       );
       return;
@@ -531,11 +841,55 @@ export async function processMasterWhatsAppEngine(params: {
   const rawLower = text.toLowerCase().trim();
   const cleanLower = rawLower.replace(/[^a-z0-9 _]+/g, '').replace(/\s+/g, ' ');
 
+  // -------------------------------------------------------------
+  // STEP 2: IDENTITY AND FIRST CONTACT
+  // Fires exactly once per new WhatsApp number before anything else
+  // -------------------------------------------------------------
+  const isBrandNewNumber = await firestoreDb.isFirstContactForWhatsAppNumber(cleanPhone);
+  if (isBrandNewNumber) {
+    const displayName = senderName && senderName !== 'Customer' && senderName.trim() ? `${senderName.trim()}, ` : '';
+    const firstContactGreeting = `Hi ${displayName}welcome. My name is Floate, I am here to help you shop whatever you need and connect you to a verified vendor. Please save the official number as Floate, so you can shop anytime, any day.`;
+
+    // 1. First-ever greeting
+    await sendWhatsAppMessage(cleanPhone, firstContactGreeting);
+
+    // 2. Ask if buyer or business
+    await sendWhatsAppMessage(
+      cleanPhone,
+      `Are you shopping today as a buyer, or do you have a business you would like to register?`,
+      {
+        quickReplies: [
+          { id: 'role_buyer', title: '🛍️ Buyer' },
+          { id: 'role_business', title: '🏪 Business' },
+        ],
+      }
+    );
+
+    // 3. Mark in Firestore buyers collection so it fires exactly once
+    await firestoreDb.recordFirstContact(cleanPhone, senderName);
+
+    updateWhatsAppSession(cleanPhone, {
+      state: 'AWAITING_ROLE_SELECTION',
+      hasSeenSaveTip: true,
+      pendingInitialText: text.length > 2 && !/^(hi|hello|hey|start|\/start)$/i.test(cleanLower) ? text : undefined,
+    });
+    return;
+  }
+
+  // -------------------------------------------------------------
+  // FLOATE SECURE LINE: ACTIVE RELAY CHAT INTERCEPTOR
+  // -------------------------------------------------------------
+  const activeRelay = getActiveRelaySession(cleanPhone);
+  if (activeRelay && activeRelay.status !== 'ENDED') {
+    await handleActiveRelayMessage(cleanPhone, senderName, text, activeRelay);
+    return;
+  }
+
   // 1. Global Reset / Cancel / Home Interceptor
   if (/^(reset|cancel|stop|exit|start over|restart|home|menu|main menu|\/start|\/cancel|btn_home)$/i.test(cleanLower)) {
-    resetWhatsAppSession(senderPhone);
-    await firestoreDb.resetUserSession(senderPhone);
-    await sendWelcomeGreeting(senderPhone, senderName);
+    resetWhatsAppSession(cleanPhone);
+    await firestoreDb.resetUserSession(cleanPhone);
+    await sendWelcomeGreeting(cleanPhone, senderName);
     return;
   }
 
@@ -544,17 +898,17 @@ export async function processMasterWhatsAppEngine(params: {
   if (locChangeMatch || /^(my location|change location|update location|switch location)$/i.test(cleanLower)) {
     const inlineLoc = locChangeMatch && locChangeMatch[1] ? locChangeMatch[1].trim() : null;
     if (inlineLoc) {
-      await firestoreDb.updateBuyerPrimaryLocation(senderPhone, inlineLoc);
-      updateWhatsAppSession(senderPhone, { state: 'IDLE' });
+      await firestoreDb.updateBuyerPrimaryLocation(cleanPhone, inlineLoc);
+      updateWhatsAppSession(cleanPhone, { state: 'IDLE' });
       await sendWhatsAppMessage(
-        senderPhone,
+        cleanPhone,
         `Your default location has been updated to ${inlineLoc}. What would you like to shop for today?`
       );
       return;
     }
-    updateWhatsAppSession(senderPhone, { state: 'AWAITING_LOCATION_CHANGE' });
+    updateWhatsAppSession(cleanPhone, { state: 'AWAITING_LOCATION_CHANGE' });
     await sendWhatsAppMessage(
-      senderPhone,
+      cleanPhone,
       "What city or area would you like to set as your default location?"
     );
     return;
@@ -563,19 +917,19 @@ export async function processMasterWhatsAppEngine(params: {
   // 1c. Handle Active Buyer Location Update / Onboarding Step
   if (session.state === 'AWAITING_LOCATION_CHANGE' || session.state === 'AWAITING_PRIMARY_LOCATION') {
     const cleanLoc = text.trim().replace(/[.,!]/g, '');
-    await firestoreDb.updateBuyerPrimaryLocation(senderPhone, cleanLoc);
-    const pendingSearch = session.searchState?.lastQuery;
-    updateWhatsAppSession(senderPhone, { state: 'IDLE' });
+    await firestoreDb.updateBuyerPrimaryLocation(cleanPhone, cleanLoc);
+    const pendingSearch = session.pendingInitialText || session.searchState?.lastQuery;
+    updateWhatsAppSession(cleanPhone, { state: 'IDLE', pendingInitialText: undefined });
 
     if (pendingSearch) {
       await sendWhatsAppMessage(
-        senderPhone,
+        cleanPhone,
         `Your shopping location has been set to ${cleanLoc}. Searching for "${pendingSearch}" near you:`
       );
-      await execute10CardSearch(senderPhone, senderName, { queryText: pendingSearch, location: cleanLoc });
+      await execute10CardSearch(cleanPhone, senderName, { queryText: pendingSearch, location: cleanLoc });
     } else {
       await sendWhatsAppMessage(
-        senderPhone,
+        cleanPhone,
         `Your shopping location has been set to ${cleanLoc}. What would you like to shop for today?`
       );
     }
@@ -584,106 +938,210 @@ export async function processMasterWhatsAppEngine(params: {
 
   // 1d. Handle Active Role Selection Step (Shopping vs Registering Business)
   if (session.state === 'AWAITING_ROLE_SELECTION') {
-    const isRegister = /^(register|sell|vendor|business|merchant|add shop|open shop|list|2)$/i.test(cleanLower);
-    const isShopping = /^(shop|shopping|buy|buyer|looking for|find|search|items|products|1)$/i.test(cleanLower);
+    const isRegister = /^(register|sell|vendor|business|merchant|add shop|open shop|list|2|role_business)$/i.test(cleanLower);
+    const isShopping = /^(shop|shopping|buy|buyer|looking for|find|search|items|products|1|role_buyer)$/i.test(cleanLower);
 
     if (isRegister) {
-      updateWhatsAppSession(senderPhone, { state: 'IDLE' });
-      await handleVendorHubRouting(senderPhone, senderName);
+      updateWhatsAppSession(cleanPhone, {
+        state: 'REG_STEP_1_BIZ_NAME',
+        regDraft: {
+          step: 'STEP_1_NAME',
+          whatsapp: cleanPhone,
+          ownerFullName: senderName && senderName !== 'Customer' ? senderName : '',
+          updatedAt: new Date().toISOString(),
+        } as any,
+      });
+      await sendWhatsAppMessage(
+        cleanPhone,
+        "Welcome to Floate for Businesses! Let's get your store set up in 4 quick steps.\n\nStep 1 of 4: What is your Business or Shop Name?"
+      );
       return;
     }
 
-    if (isShopping || cleanLower.length > 1) {
-      if (isShopping && cleanLower.length < 12) {
-        updateWhatsAppSession(senderPhone, { state: 'AWAITING_PRIMARY_LOCATION' });
-        await sendWhatsAppMessage(
-          senderPhone,
-          "What city or area are you usually shopping from?"
-        );
-        return;
-      } else {
-        // User directly typed their search item (e.g. "footwear" or "solar battery")
-        updateWhatsAppSession(senderPhone, {
-          state: 'AWAITING_PRIMARY_LOCATION',
-          searchState: { lastQuery: text, pageIndex: 0, updatedAt: new Date().toISOString() },
-        });
-        await sendWhatsAppMessage(
-          senderPhone,
-          "What city or area are you usually shopping from?"
-        );
-        return;
-      }
-    }
-  }
-
-  // 2. Simple Greeting & Small-Talk Handler (Intercept before buyer search)
-  const isGreeting = /^(hi|hi floate|hello|hello floate|hey|hey floate|good morning|good afternoon|good evening|start|\/start)$/i.test(cleanLower);
-  if (isGreeting) {
-    resetWhatsAppSession(senderPhone);
-    await firestoreDb.resetUserSession(senderPhone);
-    await sendWelcomeGreeting(senderPhone, senderName);
-    return;
-  }
-
-  const isSmallTalk = /^(how are you|how are you doing|how far|how body|how are you today)$/i.test(cleanLower);
-  if (isSmallTalk) {
-    const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
-    const prefix = name ? `Hello ${name}, ` : 'Hello, ';
+    // Default to Buyer route
+    updateWhatsAppSession(cleanPhone, { state: 'AWAITING_PRIMARY_LOCATION' });
     await sendWhatsAppMessage(
-      senderPhone,
-      `${prefix}I am doing well, thank you. What would you like to shop for today?`
+      cleanPhone,
+      "What city or area are you usually shopping from?"
     );
     return;
   }
 
-  // 3. Deep-Linked Register Business / Vendor Hub / Merchant Portal Trigger (Supports Natural Language)
-  if (
-    text === 'START_REGISTER_VENDOR' ||
-    text === 'btn_for_businesses' ||
-    text === 'btn_vendor_portal' ||
-    text === 'btn_vendor_dashboard' ||
-    /\b(register\s+(my\s+)?(business|store|shop|account|company)|i\s+want\s+to\s+(register|sell|start\s+selling|list\s+my\s+shop|create\s+a\s+shop)|how\s+(can|do)\s+i\s+(register|start\s+selling|sell|list\s+my\s+shop)|create\s+(a\s+)?(business|store|shop)|list\s+my\s+(business|store|shop|company)|sign\s+up\s+(as\s+a\s+)?(merchant|seller|vendor|business)|open\s+(a\s+)?(store|shop)|onboard\s+my\s+(business|shop|store)|become\s+a\s+(seller|vendor|merchant)|sell\s+on\s+floate|merchant\s+registration|vendor\s+registration)\b/i.test(cleanLower) ||
-    /^(register|register business|register my business|register shop|start selling|sell|vendor registration|merchant registration|open shop|add my shop|list my shop|vendor|business|vendor hub|merchant|my business|vendor portal|manage|merchant portal|dashboard|my store|store)$/i.test(cleanLower)
-  ) {
-    await handleVendorHubRouting(senderPhone, senderName);
+  // 1e. Lightweight Business Registration Steps (4 Steps)
+  if (session.state === 'REG_STEP_1_BIZ_NAME') {
+    const bizName = text.trim();
+    updateWhatsAppSession(cleanPhone, {
+      state: 'REG_STEP_2_CATEGORY',
+      regDraft: {
+        ...(session.regDraft || {}),
+        businessName: bizName,
+        updatedAt: new Date().toISOString(),
+      } as any,
+    });
+    await sendWhatsAppMessage(
+      cleanPhone,
+      `Great! Step 2 of 4: What category does your business belong to?\n(e.g., Electronics, Fashion, Footwear, Solar & Inverter, Food & Groceries, Beauty & Hair, Automobile, Services)`
+    );
     return;
   }
 
-  // 4. Vendor Self-Service Direct Action Triggers (Supports Natural Language)
-  if (
-    text === 'btn_vendor_stats' ||
-    /\b(my\s+stats|store\s+stats|business\s+stats|how\s+many\s+searches|view\s+stats|shop\s+performance|business\s+performance|my\s+analytics|how\s+is\s+my\s+shop\s+doing|how\s+is\s+my\s+store\s+performing|how\s+is\s+my\s+business\s+performing)\b/i.test(cleanLower) ||
-    /^(stats|view stats|performance|my stats|mystats|my business stats|business stats|store stats|analytics)$/i.test(cleanLower)
-  ) {
-    await handleVendorStats(senderPhone, senderName);
+  if (session.state === 'REG_STEP_2_CATEGORY') {
+    const category = text.trim();
+    updateWhatsAppSession(cleanPhone, {
+      state: 'REG_STEP_3_LOCATION',
+      regDraft: {
+        ...(session.regDraft || {}),
+        category,
+        updatedAt: new Date().toISOString(),
+      } as any,
+    });
+    await sendWhatsAppMessage(
+      cleanPhone,
+      `Step 3 of 4: What State and City or Market is your store located in?\n(e.g., Anambra, Onitsha Main Market or Lagos, Ikeja)`
+    );
     return;
   }
 
-  if (
-    text === 'btn_vendor_add_product' ||
-    /\b(add\s+(a\s+)?(new\s+)?(product|item|listing|stock)|i\s+want\s+to\s+add\s+(a\s+)?(new\s+)?(product|item)|upload\s+(a\s+)?(new\s+)?(product|item)|post\s+(a\s+)?(new\s+)?(product|item)|list\s+(a\s+)?(new\s+)?(product|item))\b/i.test(cleanLower) ||
-    /^(add product|addproduct|add item|new product|list product|upload product|add a product|post product|add new product)$/i.test(cleanLower)
-  ) {
-    await startVendorAddProduct(senderPhone, senderName);
+  if (session.state === 'REG_STEP_3_LOCATION') {
+    const rawLoc = text.trim();
+    const parts = rawLoc.split(/[,\-\/]/).map((s) => s.trim()).filter(Boolean);
+    const state = parts[0] || 'Lagos';
+    const city = parts[1] || parts[0] || 'Lagos';
+
+    updateWhatsAppSession(cleanPhone, {
+      state: 'REG_STEP_4_PRODUCT',
+      regDraft: {
+        ...(session.regDraft || {}),
+        state,
+        city,
+        updatedAt: new Date().toISOString(),
+      } as any,
+    });
+    await sendWhatsAppMessage(
+      cleanPhone,
+      `Step 4 of 4: What is the main product or item you sell, and what is the starting price?\n(e.g., Italian Leather Slippers - 15,000 NGN)`
+    );
     return;
   }
 
-  if (
-    text === 'btn_vendor_edit_products' ||
-    /\b(edit\s+(my\s+)?(product|products|item|items|listing|listings|prices|catalog|store)|modify\s+(my\s+)?(product|products|item|items|listing|listings)|update\s+(my\s+)?(product|products|prices|listings)|manage\s+(my\s+)?(products|inventory))\b/i.test(cleanLower) ||
-    /^(edit product|edit products|editproduct|edit listings|my inventory|inventory|manage products|edit prices|update product|edit my products)$/i.test(cleanLower)
-  ) {
-    await startVendorEditProducts(senderPhone, senderName);
+  if (session.state === 'REG_STEP_4_PRODUCT') {
+    const prodText = text.trim();
+    const prodParts = prodText.split(/[-–:]/);
+    const firstProduct = prodParts[0]?.trim() || prodText;
+    const firstPrice = prodParts[1]?.trim() || 'Market Rate';
+    const bizName = (session.regDraft as any)?.businessName || 'My Business';
+    const category = (session.regDraft as any)?.category || 'General';
+    const state = (session.regDraft as any)?.state || 'Lagos';
+    const city = (session.regDraft as any)?.city || 'Lagos';
+    const ownerFullName = (session.regDraft as any)?.ownerFullName || senderName || bizName;
+
+    await firestoreDb.registerBusinessAccount({
+      whatsapp: cleanPhone,
+      businessName: bizName,
+      ownerFullName,
+      category,
+      state,
+      city,
+      firstProduct,
+      firstPrice,
+    });
+
+    resetWhatsAppSession(cleanPhone);
+    await sendWhatsAppMessage(
+      cleanPhone,
+      `🎉 Congratulations! Your business "${bizName}" is now registered and live on Floate.\n\nBuyers searching across Nigeria can now discover your products and message you directly on WhatsApp. Welcome aboard!`
+    );
+    return;
+  }
+
+  // -------------------------------------------------------------
+  // STEP 3: INBOUND ROUTING & CLASSIFICATION
+  // High-precision intent classifier combining fast regex routing and Gemini commerce parsing
+  // -------------------------------------------------------------
+  const classification = await classifyInboundIntent(text);
+  pushWaLog(`🧭 Intent Classified: ${classification.intent} (${(classification.confidence * 100).toFixed(0)}%) for +${cleanPhone}`);
+
+  // 1. Reset / Home
+  if (classification.intent === 'RESET_OR_HOME') {
+    resetWhatsAppSession(cleanPhone);
+    await firestoreDb.resetUserSession(cleanPhone);
+    await sendWelcomeGreeting(cleanPhone, senderName);
+    return;
+  }
+
+  // 2. Simple Greeting
+  if (classification.intent === 'GREETING') {
+    const buyer = await firestoreDb.getBuyer(cleanPhone).catch(() => null);
+    const brandReply = await generateBrandConversationalResponse(text, senderName, buyer?.primaryCity || 'Nigeria');
+    await sendWhatsAppMessage(cleanPhone, brandReply);
+    return;
+  }
+
+  // 3. Brand Questions (e.g. "what is floate about", "who made floate")
+  if (classification.intent === 'BRAND_QUESTION') {
+    const buyer = await firestoreDb.getBuyer(cleanPhone).catch(() => null);
+    const brandReply = await generateBrandConversationalResponse(text, senderName, buyer?.primaryCity || 'Nigeria');
+    await sendWhatsAppMessage(cleanPhone, brandReply);
+    return;
+  }
+
+  // 4. Small Talk / Conversational Check-ins (e.g. "how are you", "how far")
+  if (classification.intent === 'SMALL_TALK') {
+    const buyer = await firestoreDb.getBuyer(cleanPhone).catch(() => null);
+    const brandReply = await generateBrandConversationalResponse(text, senderName, buyer?.primaryCity || 'Nigeria');
+    await sendWhatsAppMessage(cleanPhone, brandReply);
+    return;
+  }
+
+  // 4. Help / Support
+  if (classification.intent === 'HELP_OR_SUPPORT') {
+    const name = senderName && senderName !== 'Customer' ? senderName.trim() : '';
+    const prefix = name ? `Hello ${name}, ` : 'Hello, ';
+    await sendWhatsAppMessage(
+      cleanPhone,
+      `${prefix}welcome to Floate! Here is how you can use Floate:\n\n` +
+      `🛍️ *To Shop:* Simply type what you want and where (e.g. "Leather shoes in Onitsha" or "Solar battery 100k") or send a voice note.\n\n` +
+      `🏪 *For Businesses:* Type "Register my shop" to list your products and connect with buyers across Nigeria.\n\n` +
+      `📍 *Change Location:* Type "Change my location" to update your default shopping city.\n\n` +
+      `🛡️ *Support & Reports:* Email us at support@floate.xyz anytime.`
+    );
+    return;
+  }
+
+  // 5. Merchant Portal / Registration
+  if (classification.intent === 'MERCHANT_PORTAL') {
+    await handleVendorHubRouting(cleanPhone, senderName);
+    return;
+  }
+
+  // 6. Merchant Direct Actions
+  if (classification.intent === 'MERCHANT_STATS') {
+    await handleVendorStats(cleanPhone, senderName);
+    return;
+  }
+
+  if (classification.intent === 'MERCHANT_ADD_PRODUCT') {
+    await startVendorAddProduct(cleanPhone, senderName);
+    return;
+  }
+
+  if (classification.intent === 'MERCHANT_EDIT_CATALOG') {
+    await startVendorEditProducts(cleanPhone, senderName);
+    return;
+  }
+
+  if (classification.intent === 'BROWSE_MARKETS') {
+    await sendMarketHubsMenu(cleanPhone);
     return;
   }
 
   if (text === 'btn_vendor_delete_account' || /^(delete account|delete store|deactivate store|deactivate account)$/i.test(cleanLower)) {
-    await startVendorDeleteAccount(senderPhone, senderName);
+    await startVendorDeleteAccount(cleanPhone, senderName);
     return;
   }
 
   if (text === 'btn_confirm_delete_account' || session.state === 'VENDOR_DELETE_CONFIRM') {
-    await handleVendorDeleteAccountConfirm(senderPhone, senderName, text);
+    await handleVendorDeleteAccountConfirm(cleanPhone, senderName, text);
     return;
   }
 
@@ -723,7 +1181,7 @@ export async function processMasterWhatsAppEngine(params: {
     /^connect\s+vendor\s+[a-z0-9_-]+/i.test(text)
   ) {
     const bizId = text.replace(/^(connect_biz_|connect_lead_|connect_vendor_|CONNECT_VENDOR_|connect\s+vendor\s+)/i, '').trim();
-    await start2StepLeadQualification(senderPhone, senderName, bizId);
+    await startFloateSecureLine(senderPhone, senderName, bizId);
     return;
   }
 
@@ -787,7 +1245,7 @@ export async function processMasterWhatsAppEngine(params: {
     if (selectedIdx >= 0 && selectedIdx < listings.length) {
       const selectedListing = listings[selectedIdx];
       if (selectedListing) {
-        await start3StepLeadQualification(senderPhone, senderName, selectedListing.id);
+        await startFloateSecureLine(senderPhone, senderName, selectedListing.id);
         return;
       }
     }
@@ -939,10 +1397,10 @@ export async function processMasterWhatsAppEngine(params: {
     return;
   }
 
-  // 11. Vendor Selection & 3-Step Lead Qualification
+  // 11. Vendor Selection & Floate Secure Line Relay Initiation
   if (text.startsWith('connect_biz_') || text.startsWith('connect_')) {
     const bizId = text.replace(/^(connect_biz_|connect_)/, '').trim();
-    await start3StepLeadQualification(senderPhone, senderName, bizId);
+    await startFloateSecureLine(senderPhone, senderName, bizId);
     return;
   }
 
@@ -1043,9 +1501,34 @@ export async function processMasterWhatsAppEngine(params: {
     return;
   }
 
-  // 12. Execute Natural Language Search Query directly
-  await execute10CardSearch(senderPhone, senderName, {
+  // 12. Direct Numeric Selection (1-10) or Business Name Selection from Active Search State
+  if (session.searchState && session.searchState.allMatchingListings && session.searchState.allMatchingListings.length > 0) {
+    const numMatch = cleanLower.match(/^(\d{1,2})$/);
+    if (numMatch) {
+      const selectedIndex = parseInt(numMatch[1], 10) - 1;
+      const pageOffset = (session.searchState.pageIndex || 0) * 10;
+      const targetListing = session.searchState.allMatchingListings[pageOffset + selectedIndex] || session.searchState.allMatchingListings[selectedIndex];
+      if (targetListing) {
+        await startFloateSecureLine(senderPhone, senderName, targetListing.id);
+        return;
+      }
+    }
+
+    // Name match against current search listings
+    const matchedByName = session.searchState.allMatchingListings.find(
+      (b: any) => b.businessName && b.businessName.toLowerCase() === cleanLower
+    );
+    if (matchedByName) {
+      await startFloateSecureLine(senderPhone, senderName, matchedByName.id);
+      return;
+    }
+  }
+
+  // 13. Execute Natural Language Search Query directly
+  await execute10CardSearch(cleanPhone, senderName, {
     queryText: text,
+    location: classification.extractedLocation || undefined,
+    parsedQuery: classification.extractedQuery,
   });
 }
 
@@ -1081,15 +1564,17 @@ async function sendWelcomeGreeting(toPhone: string, senderName: string) {
 /**
  * 2. 10-BUSINESS SEARCH & DISCOVERY ENGINE (Spotlight Priority with Organic Fallback)
  */
-async function execute10CardSearch(toPhone: string, senderName: string, params: { queryText: string; location?: string }) {
-  const { queryText, location } = params;
+async function execute10CardSearch(toPhone: string, senderName: string, params: { queryText: string; location?: string; parsedQuery?: any }) {
+  const { queryText, location, parsedQuery } = params;
 
   // 1. AI Parsing with Gemini
-  let parsed;
-  try {
-    parsed = await parseShoppingQuery(queryText);
-  } catch {
-    parsed = { searchKeywords: queryText, targetSellerLocation: location };
+  let parsed = parsedQuery;
+  if (!parsed) {
+    try {
+      parsed = await parseShoppingQuery(queryText);
+    } catch {
+      parsed = { searchKeywords: queryText, targetSellerLocation: location };
+    }
   }
 
   const cleanProduct = parsed.searchKeywords || queryText;
@@ -1236,30 +1721,52 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
   let previewMsg = `🔍 *Businesses matching "${cleanProduct}"${locNotice}:*\n\n`;
 
   if (spotlightInPrimary.length > 0) {
-    previewMsg += `*Top Spotlight Businesses*\n\n`;
+    previewMsg += `⭐ *Top Spotlight Businesses*\n\n`;
     for (let i = 0; i < spotlightInPrimary.length; i++) {
       const v = spotlightInPrimary[i];
       const idx = primaryDisplay.indexOf(v) + 1;
-      const priceDisplay = v.price || 'Market Rate';
-      previewMsg += `${idx}. *${v.businessName}* — ${v.product} (${priceDisplay})\n\n`;
+      const priceDisplay = v.price ? `₦${v.price.replace(/^₦/, '')}` : 'Market Rate';
+      const locString = v.city ? `📍 ${v.city}` : v.state ? `📍 ${v.state}` : '';
+      previewMsg += `${idx}. *${v.businessName}* (⭐ Spotlight)\n   📦 ${v.product}\n   💰 ${priceDisplay} • ${locString}\n\n`;
     }
   }
 
   if (organicInPrimary.length > 0) {
     if (spotlightInPrimary.length > 0) {
-      previewMsg += `*Verified Vendors*\n\n`;
+      previewMsg += `🛍️ *Verified Local Vendors*\n\n`;
     }
     for (let i = 0; i < organicInPrimary.length; i++) {
       const v = organicInPrimary[i];
       const idx = primaryDisplay.indexOf(v) + 1;
-      const priceDisplay = v.price || 'Market Rate';
-      previewMsg += `${idx}. *${v.businessName}* — ${v.product} (${priceDisplay})\n\n`;
+      const priceDisplay = v.price ? `₦${v.price.replace(/^₦/, '')}` : 'Market Rate';
+      const locString = v.city ? `📍 ${v.city}` : v.state ? `📍 ${v.state}` : '';
+      previewMsg += `${idx}. *${v.businessName}*\n   📦 ${v.product}\n   💰 ${priceDisplay} • ${locString}\n\n`;
     }
   }
 
+  // SCENARIO A: 3 or fewer results -> Use Meta Interactive Buttons (Max 3 Buttons)
+  if (primaryDisplay.length <= 3) {
+    previewMsg +=
+      `────────────────────\n` +
+      `💡 *How to connect:*\n` +
+      `• Tap a vendor button below, OR\n` +
+      `• Reply with the number (e.g. \`1\`, \`2\`) or business name`;
+
+    const quickButtons: WhatsAppButton[] = primaryDisplay.map((v, i) => ({
+      id: `connect_biz_${v.id}`,
+      title: `${i + 1}. ${(v.businessName || 'Connect').substring(0, 16)}`,
+    }));
+
+    await sendWhatsAppMessage(toPhone, previewMsg, {
+      quickReplies: quickButtons,
+    });
+    return;
+  }
+
+  // SCENARIO B: More than 3 results -> Use Meta Interactive Slide-Up List Menu
   previewMsg +=
     `────────────────────\n` +
-    `💡 *How to select:*\n` +
+    `💡 *How to connect:*\n` +
     `• Tap *"Select Vendor"* below, OR\n` +
     `• Reply with the number (e.g. \`1\`, \`2\`, \`3\`) or business name`;
 
@@ -1268,13 +1775,15 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
 
   if (spotlightInPrimary.length > 0) {
     menuSections.push({
-      title: 'Top Spotlight Businesses',
+      title: '⭐ Top Spotlight Businesses',
       rows: spotlightInPrimary.map((v) => {
         const fullIdx = primaryDisplay.findIndex(p => p.id === v.id) + 1;
+        const priceDisplay = v.price ? `₦${v.price.replace(/^₦/, '')}` : 'Best Price';
+        const locSub = v.city ? ` • ${v.city}` : '';
         return {
           id: `connect_biz_${v.id}`,
           title: `${fullIdx}. ${v.businessName}`.substring(0, 24),
-          description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
+          description: `${v.product} • ${priceDisplay}${locSub}`.substring(0, 72),
         };
       }),
     });
@@ -1282,19 +1791,21 @@ async function execute10CardSearch(toPhone: string, senderName: string, params: 
 
   if (organicInPrimary.length > 0) {
     menuSections.push({
-      title: 'Verified Vendors',
+      title: '🛍️ Verified Local Vendors',
       rows: organicInPrimary.map((v) => {
         const fullIdx = primaryDisplay.findIndex(p => p.id === v.id) + 1;
+        const priceDisplay = v.price ? `₦${v.price.replace(/^₦/, '')}` : 'Best Price';
+        const locSub = v.city ? ` • ${v.city}` : '';
         return {
           id: `connect_biz_${v.id}`,
           title: `${fullIdx}. ${v.businessName}`.substring(0, 24),
-          description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
+          description: `${v.product} • ${priceDisplay}${locSub}`.substring(0, 72),
         };
       }),
     });
   }
 
-  // If fewer than 10 total vendors are displayed, optionally fill remaining slots with quick action rows
+  // If fewer than 10 total vendors are displayed, fill remaining slots with quick action rows
   const currentTotalRows = spotlightInPrimary.length + organicInPrimary.length;
   const remainingSlots = 10 - currentTotalRows;
 
@@ -1378,21 +1889,26 @@ async function handleShowNext10Vendors(toPhone: string, senderName: string, sess
 
   for (let i = 0; i < next10.length; i++) {
     const v = next10[i];
-    const priceDisplay = v.price || 'Market Rate';
-    previewMsg += `${startIdx + i + 1}. *${v.businessName}* — ${v.product} (${priceDisplay})\n\n`;
+    const priceDisplay = v.price ? `₦${v.price.replace(/^₦/, '')}` : 'Market Rate';
+    const locString = v.city ? `📍 ${v.city}` : v.state ? `📍 ${v.state}` : '';
+    previewMsg += `${startIdx + i + 1}. *${v.businessName}*\n   📦 ${v.product}\n   💰 ${priceDisplay} • ${locString}\n\n`;
   }
 
   previewMsg +=
     `────────────────────\n` +
-    `💡 *How to select:*\n` +
+    `💡 *How to connect:*\n` +
     `• Tap *"Select Vendor"* below, OR\n` +
     `• Reply with the number or business name`;
 
-  const listRows = next10.slice(0, 10).map((v: any, idx: number) => ({
-    id: `connect_biz_${v.id}`,
-    title: `${startIdx + idx + 1}. ${v.businessName}`.substring(0, 24),
-    description: `${v.product} • ${v.price || 'Best Price'}`.substring(0, 72),
-  }));
+  const listRows = next10.slice(0, 10).map((v: any, idx: number) => {
+    const priceDisplay = v.price ? `₦${v.price.replace(/^₦/, '')}` : 'Best Price';
+    const locSub = v.city ? ` • ${v.city}` : '';
+    return {
+      id: `connect_biz_${v.id}`,
+      title: `${startIdx + idx + 1}. ${v.businessName}`.substring(0, 24),
+      description: `${v.product} • ${priceDisplay}${locSub}`.substring(0, 72),
+    };
+  });
 
   const menuSections: WhatsAppListSection[] = [
     {

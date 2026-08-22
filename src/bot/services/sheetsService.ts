@@ -1,6 +1,7 @@
 import { google } from 'googleapis';
 import { config } from '../config.js';
 import { firestoreDb } from './firestoreService.js';
+import { withExternalTimeout } from './timeoutService.js';
 
 export interface LocalSheetRow {
   timestamp: string;
@@ -363,6 +364,40 @@ export const DEFAULT_SEED_LISTINGS: BusinessListing[] = [
     category: 'Footwear & Slippers',
     product: 'Unisex Slippers, Leather Sandals & Slides',
     price: '₦12,000',
+    negotiation: 'Yes',
+    registeredSince: 'Jul 2026',
+    productCount: 1,
+    isVerified: true,
+    isHighlyRecommended: true,
+  },
+  {
+    id: 'seed-mbams',
+    userId: 'seed-mbams',
+    businessName: 'MBAMS PHONES & GADGETS',
+    whatsapp: '08101234567',
+    state: 'Lagos',
+    city: 'Computer Village, Ikeja',
+    listingType: 'Product',
+    category: 'Phones & Gadgets',
+    product: 'Smartphones, iPhones, UK Used Devices & Accessories',
+    price: 'Contact for Best Price',
+    negotiation: 'Yes',
+    registeredSince: 'Jul 2026',
+    productCount: 1,
+    isVerified: true,
+    isHighlyRecommended: true,
+  },
+  {
+    id: 'seed-jules',
+    userId: 'seed-jules',
+    businessName: 'JULES BOUTIQUE & APPAREL',
+    whatsapp: '08109876543',
+    state: 'Lagos',
+    city: 'Balogun Market, Lagos Island',
+    listingType: 'Product',
+    category: 'Boutique & Fashion Wears',
+    product: 'Designer Handbags, Corporate & Casual Outfits, Dresses',
+    price: 'Contact for Best Price',
     negotiation: 'Yes',
     registeredSince: 'Jul 2026',
     productCount: 1,
@@ -1272,106 +1307,116 @@ class SheetsDatabaseService {
   }
 
   /**
-   * Syncs and loads live business listings directly from Google Sheets ('Floate Business logs' tab)
+   * Syncs and loads live business listings directly from Google Sheets ('Floate Business logs' tab) with 8-10s timeout
    */
   public async syncListingsFromSheets(force: boolean = false): Promise<BusinessListing[]> {
-    const now = Date.now();
-    if (!force && this.lastSheetsSyncTime > 0 && (now - this.lastSheetsSyncTime < 30000) && this.businessListings.length > 0) {
-      return this.businessListings;
-    }
-
-    if (!this.activeSpreadsheetId) {
-      return this.businessListings;
-    }
-
-    try {
-      const sheets = this.getSheetsClient();
-      const tabName = await this.ensureTabExists(sheets, 'Floate Business logs', [
-        'Business name', 'whatsapp Number', 'Location', 'Type', 'Category', 'Product', 'Price', 'Negotiation', 'Spotlight', 'TELEGRAM ID', 'DATE', 'VERIFIED/CLAIMED', 'business full name'
-      ]);
-
-      const res = await sheets.spreadsheets.values.get({
-        spreadsheetId: this.activeSpreadsheetId,
-        range: `'${tabName}'!A2:M1000`,
-      });
-
-      const values = res.data.values || [];
-      const fetchedListings: BusinessListing[] = [];
-
-      values.forEach((row: any[], index: number) => {
-        const bizName = (row[0] || '').trim();
-        const whatsapp = (row[1] || '').trim();
-        if (!bizName || !whatsapp) return;
-
-        const rawLoc = (row[2] || '').trim();
-        const listingType = (row[3] || 'Product').trim();
-        const category = (row[4] || 'General').trim();
-        const product = (row[5] || category || bizName).trim();
-        const price = (row[6] || 'Contact for price').trim();
-        const negotiationRaw = (row[7] || '').trim().toLowerCase();
-        const isNeg: 'Yes' | 'No' = (negotiationRaw === 'no' || negotiationRaw === 'n' || negotiationRaw === 'fixed') ? 'No' : 'Yes';
-        const regDate = (row[8] || 'Jul 2026').trim();
-        const telegramIdFromSheet = (row[9] || '').trim(); // Column J: TELEGRAM ID Number
-        const verifiedRaw = (row[11] || '').trim().toUpperCase(); // Column L: VERIFIED/CLAIMED
-        const ownerFullName = (row[12] || '').trim(); // Column M: business full name
-
-        let city = rawLoc;
-        let state = rawLoc;
-        if (rawLoc.includes(',')) {
-          const parts = rawLoc.split(',').map((p) => p.trim());
-          city = parts[0];
-          state = parts.slice(1).join(', ');
+    return withExternalTimeout(
+      async () => {
+        const now = Date.now();
+        if (!force && this.lastSheetsSyncTime > 0 && (now - this.lastSheetsSyncTime < 30000) && this.businessListings.length > 0) {
+          return this.businessListings;
         }
 
-        const isVer = verifiedRaw === 'YES' || verifiedRaw === 'TRUE';
-        const uId = telegramIdFromSheet || `sheet-${index + 1}`;
+        if (!this.activeSpreadsheetId) {
+          return this.businessListings;
+        }
 
-        fetchedListings.push({
-          id: `sheet-${index + 1}`,
-          userId: uId,
-          telegramId: telegramIdFromSheet || undefined,
-          businessName: bizName,
-          ownerFullName: ownerFullName || undefined,
-          whatsapp,
-          state,
-          city,
-          listingType,
-          category,
-          product,
-          price,
-          negotiation: isNeg,
-          registeredSince: regDate,
-          productCount: 1,
-          isVerified: isVer || true,
-          verifiedStatus: isVer ? 'YES' : 'PENDING',
-          isHighlyRecommended: isSpotlightBusiness(bizName),
-        });
-      });
+        try {
+          const sheets = this.getSheetsClient();
+          const tabName = await this.ensureTabExists(sheets, 'Floate Business logs', [
+            'Business name', 'whatsapp Number', 'Location', 'Type', 'Category', 'Product', 'Price', 'Negotiation', 'Spotlight', 'TELEGRAM ID', 'DATE', 'VERIFIED/CLAIMED', 'business full name'
+          ]);
 
-      if (fetchedListings.length > 0) {
-        // Merge spotlight seed listings if not already in fetchedListings
-        for (const seed of DEFAULT_SEED_LISTINGS) {
-          const exists = fetchedListings.some(
-            (f) =>
-              f.businessName.toLowerCase() === seed.businessName.toLowerCase() ||
-              normalizePhone(f.whatsapp) === normalizePhone(seed.whatsapp)
-          );
-          if (!exists) {
-            fetchedListings.unshift(seed);
-            this.appendSeedToSheets(sheets, tabName, seed).catch(() => {});
+          const res = await sheets.spreadsheets.values.get({
+            spreadsheetId: this.activeSpreadsheetId,
+            range: `'${tabName}'!A2:M1000`,
+          });
+
+          const values = res.data.values || [];
+          const fetchedListings: BusinessListing[] = [];
+
+          values.forEach((row: any[], index: number) => {
+            const bizName = (row[0] || '').trim();
+            const whatsapp = (row[1] || '').trim();
+            if (!bizName || !whatsapp) return;
+
+            const rawLoc = (row[2] || '').trim();
+            const listingType = (row[3] || 'Product').trim();
+            const category = (row[4] || 'General').trim();
+            const product = (row[5] || category || bizName).trim();
+            const price = (row[6] || 'Contact for price').trim();
+            const negotiationRaw = (row[7] || '').trim().toLowerCase();
+            const isNeg: 'Yes' | 'No' = (negotiationRaw === 'no' || negotiationRaw === 'n' || negotiationRaw === 'fixed') ? 'No' : 'Yes';
+            const regDate = (row[8] || 'Jul 2026').trim();
+            const telegramIdFromSheet = (row[9] || '').trim(); // Column J: TELEGRAM ID Number
+            const verifiedRaw = (row[11] || '').trim().toUpperCase(); // Column L: VERIFIED/CLAIMED
+            const ownerFullName = (row[12] || '').trim(); // Column M: business full name
+
+            let city = rawLoc;
+            let state = rawLoc;
+            if (rawLoc.includes(',')) {
+              const parts = rawLoc.split(',').map((p) => p.trim());
+              city = parts[0];
+              state = parts.slice(1).join(', ');
+            }
+
+            const isVer = verifiedRaw === 'YES' || verifiedRaw === 'TRUE';
+            const uId = telegramIdFromSheet || `sheet-${index + 1}`;
+
+            fetchedListings.push({
+              id: `sheet-${index + 1}`,
+              userId: uId,
+              telegramId: telegramIdFromSheet || undefined,
+              businessName: bizName,
+              ownerFullName: ownerFullName || undefined,
+              whatsapp,
+              state,
+              city,
+              listingType,
+              category,
+              product,
+              price,
+              negotiation: isNeg,
+              registeredSince: regDate,
+              productCount: 1,
+              isVerified: isVer || true,
+              verifiedStatus: isVer ? 'YES' : 'PENDING',
+              isHighlyRecommended: isSpotlightBusiness(bizName),
+            });
+          });
+
+          if (fetchedListings.length > 0) {
+            // Merge spotlight seed listings if not already in fetchedListings
+            for (const seed of DEFAULT_SEED_LISTINGS) {
+              const exists = fetchedListings.some(
+                (f) =>
+                  f.businessName.toLowerCase() === seed.businessName.toLowerCase() ||
+                  normalizePhone(f.whatsapp) === normalizePhone(seed.whatsapp)
+              );
+              if (!exists) {
+                fetchedListings.unshift(seed);
+                this.appendSeedToSheets(sheets, tabName, seed).catch(() => {});
+              }
+            }
+            this.businessListings = fetchedListings;
+            this.lastSheetsSyncTime = now;
           }
+        } catch (err: any) {
+          console.warn('[Sheets Sync Notice] Could not sync live listings from Google Sheets:', err?.message || err);
         }
-        this.businessListings = fetchedListings;
-        this.lastSheetsSyncTime = now;
+
+        // Always ensure Firestore is synced with the latest business listings
+        firestoreDb.syncMerchantsFromListings(this.businessListings).catch(() => {});
+
+        return this.businessListings;
+      },
+      {
+        timeoutMs: 8500,
+        serviceName: 'GoogleSheets',
+        operationName: 'syncListingsFromSheets',
+        fallbackValue: this.businessListings,
       }
-    } catch (err: any) {
-      console.warn('[Sheets Sync Notice] Could not sync live listings from Google Sheets:', err?.message || err);
-    }
-
-    // Always ensure Firestore is synced with the latest business listings
-    firestoreDb.syncMerchantsFromListings(this.businessListings).catch(() => {});
-
-    return this.businessListings;
+    );
   }
 
   private async appendSeedToSheets(sheets: any, tabName: string, listing: BusinessListing): Promise<void> {
@@ -1457,16 +1502,22 @@ class SheetsDatabaseService {
 
     const cleanQ = cleanSearchTerm(q);
 
-    // Identify product domain keywords
-    const isBagQuery = /\b(bag|bags|handbag|handbags|purse|purses|tote|backpack|backpacks|clutch|clutches|duffle)\b/i.test(cleanQ);
-    const isFootwearQuery = /\b(footwear|footwears|shoe|shoes|slipper|slippers|sandal|sandals|slide|slides|palm|palms|crocs|heels|boot|boots|leather slipper|leather slippers|footwear vendor|shoe vendor)\b/i.test(cleanQ) || cleanQ.includes('slipper') || cleanQ.includes('footwear');
-    const isPhoneQuery = /\b(phone|phones|iphone|samsung|gadget|gadgets|airpod|airpods|earbud|charger|powerbank)\b/i.test(cleanQ);
-    const isLaptopQuery = /\b(laptop|laptops|computer|macbook|pc|desktop|monitor)\b/i.test(cleanQ);
-    const isVideoEditorQuery = /\b(video|videos|edit|editor|editing|videographer|videography|filming|motion graphics|video production|content creator)\b/i.test(cleanQ);
-    const isLegalQuery = /\b(lawyer|attorney|law|legal|advocate|law firm|barrister|solicitor)\b/i.test(cleanQ);
-    const isAutoQuery = /\b(mechanic|auto|automobile|car repair|vehicle|motor|engine)\b/i.test(cleanQ);
-    const isClothingQuery = /\b(cloth|clothing|dress|gown|shirt|trouser|native|native wear|fashion|tailor|sewing)\b/i.test(cleanQ);
-    const isCateringQuery = /\b(catering|caterer|food|chef|cook|wedding food|meal)\b/i.test(cleanQ);
+    // Identify product domain keywords & synonym expansions
+    const isBagQuery = /\b(bag|bags|handbag|handbags|purse|purses|tote|backpack|backpacks|clutch|clutches|duffle|leather bag|school bag|travelling bag|travel bag)\b/i.test(cleanQ);
+    const isFootwearQuery = /\b(footwear|footwears|shoe|shoes|slipper|slippers|sandal|sandals|slide|slides|palm|palms|crocs|heels|boot|boots|leather slipper|leather slippers|footwear vendor|shoe vendor|sneakers|loafers)\b/i.test(cleanQ) || cleanQ.includes('slipper') || cleanQ.includes('footwear');
+    const isPhoneQuery = /\b(phone|phones|iphone|samsung|gadget|gadgets|airpod|airpods|earbud|charger|powerbank|smart phone|android|screen guard|phone case|cables)\b/i.test(cleanQ);
+    const isLaptopQuery = /\b(laptop|laptops|computer|macbook|pc|desktop|monitor|notebook|thinkpad|latitude|elitebook|ultrabook|computing|hard drive|ssd|keyboard|mouse)\b/i.test(cleanQ);
+    const isVideoEditorQuery = /\b(video|videos|edit|editor|editing|videographer|videography|filming|motion graphics|video production|content creator|cinematography|reel|reels)\b/i.test(cleanQ);
+    const isLegalQuery = /\b(lawyer|attorney|law|legal|advocate|law firm|barrister|solicitor|cac|agreement|notary|court|legal counsel)\b/i.test(cleanQ);
+    const isAutoQuery = /\b(mechanic|auto|automobile|car repair|vehicle|motor|engine|panel beater|car painter|car battery|spare parts|gearbox|car electrician)\b/i.test(cleanQ);
+    const isClothingQuery = /\b(cloth|clothing|dress|gown|shirt|trouser|native|native wear|fashion|tailor|sewing|senator wear|agbada|ankara|suit|jeans|hoodie|boutique)\b/i.test(cleanQ);
+    const isCateringQuery = /\b(catering|caterer|food|chef|cook|wedding food|meal|restaurant|baking|cakes|pastries|small chops|shawarma|jollof|party food)\b/i.test(cleanQ);
+    const isRealEstateQuery = /\b(house|apartment|flat|rent|property|real estate|agent|realtor|land|lands|self contain|duplex|shortlet|landlord|hostel|office space)\b/i.test(cleanQ);
+    const isBeautyQuery = /\b(salon|hair|haircut|barber|barbing|wig|wigs|hairstylist|makeup|make up|cosmetics|skincare|skin care|braids|frontals|lashes|pedicure|manicure|spa)\b/i.test(cleanQ);
+    const isSolarQuery = /\b(solar|inverter|inverters|battery|batteries|solar panel|panels|ups|energy|backup power|clean power|tubular battery|lithium)\b/i.test(cleanQ);
+    const isPrintingQuery = /\b(print|printing|flyer|flyers|banner|banners|branding|graphics|sticker|stickers|business card|business cards|tshirt printing|stationery)\b/i.test(cleanQ);
+    const isPhotographyQuery = /\b(photo|photography|photographer|studio|photoshoot|headshot|picture|camera|portrait|event coverage)\b/i.test(cleanQ);
+    const isEventPlanningQuery = /\b(event planner|event planning|decorator|event decorator|usher|ushers|mc|master of ceremony|dj|sound system|stage|canopy|chairs)\b/i.test(cleanQ);
 
     const calculateRelevanceScore = (b: BusinessListing): { totalScore: number; isExactProductMatch: boolean; matchesLocation: boolean } => {
       const prod = b.product.toLowerCase();
@@ -1477,16 +1528,22 @@ class SheetsDatabaseService {
       let score = 0;
       let exactProductMatch = false;
 
-      // Product group domain traits
-      const isListingFootwear = /\b(footwear|footwears|shoe|shoes|slipper|slippers|sandal|sandals|slide|slides|palm|palms|crocs|heels|boot|boots|leather slippers|leather slipper)\b/i.test(prod) || /\b(footwear|shoes|apparel)\b/i.test(category) || /\b(chivora|goody|goody's)\b/i.test(biz);
-      const isListingBag = /\b(bag|bags|handbag|handbags|purse|purses|tote|backpack|clutch|duffle|wallet)\b/i.test(prod) || /\b(bag|bags|handbag|accessories)\b/i.test(category);
-      const isListingPhone = /\b(phone|phones|iphone|samsung|gadget|gadgets|airpod|airpods|charger|powerbank|xiaomi|redmi|tecno|infinix|oppo)\b/i.test(prod) || /\b(phone|phones|gadget|gadgets|electronics|mobile)\b/i.test(category);
+      // Product group domain traits & synonyms
+      const isListingFootwear = /\b(footwear|footwears|shoe|shoes|slipper|slippers|sandal|sandals|slide|slides|palm|palms|crocs|heels|boot|boots|sneakers|loafers|leather slippers|leather slipper)\b/i.test(prod) || /\b(footwear|shoes|apparel)\b/i.test(category) || /\b(chivora|goody|goody's)\b/i.test(biz);
+      const isListingBag = /\b(bag|bags|handbag|handbags|purse|purses|tote|backpack|clutch|duffle|wallet|school bag|travel bag)\b/i.test(prod) || /\b(bag|bags|handbag|accessories|boutique)\b/i.test(category);
+      const isListingPhone = /\b(phone|phones|iphone|samsung|gadget|gadgets|airpod|airpods|charger|powerbank|xiaomi|redmi|tecno|infinix|oppo|smart phone|android)\b/i.test(prod) || /\b(phone|phones|gadget|gadgets|electronics|mobile)\b/i.test(category);
       const isListingLaptop = /\b(laptop|laptops|computer|computers|macbook|pc|desktop|monitors|hp|dell|lenovo|thinkpad|latitude|elitebook|probook|pavilion|inspiron|asus|acer|toshiba|surface|notebook|ultrabook|workstation|system|systems)\b/i.test(prod) || /\b(computing|computer|computers|laptop|laptops|electronics|gadgets|tech|it|systems)\b/i.test(category);
-      const isListingVideoEditor = /\b(video|edit|editor|editing|videographer|filming|motion|content creation|media production)\b/i.test(prod) || /\b(media|video|editing|production|creative)\b/i.test(category);
-      const isListingLegal = /\b(lawyer|attorney|law|legal|advocate|barrister|solicitor)\b/i.test(prod) || /\b(legal|law|consulting)\b/i.test(category);
-      const isListingAuto = /\b(mechanic|auto|car|automobile|vehicle|motor|engine)\b/i.test(prod) || /\b(auto|mechanic|automotive)\b/i.test(category);
-      const isListingClothing = /\b(cloth|clothing|dress|gown|shirt|trouser|native|fashion|tailor|sewing)\b/i.test(prod) || /\b(clothing|fashion|apparel|textiles)\b/i.test(category);
-      const isListingCatering = /\b(catering|caterer|food|cook|meal)\b/i.test(prod) || /\b(catering|food|hospitality)\b/i.test(category);
+      const isListingVideoEditor = /\b(video|edit|editor|editing|videographer|filming|motion|content creation|media production|cinematography)\b/i.test(prod) || /\b(media|video|editing|production|creative)\b/i.test(category);
+      const isListingLegal = /\b(lawyer|attorney|law|legal|advocate|barrister|solicitor|cac|agreement|notary)\b/i.test(prod) || /\b(legal|law|consulting)\b/i.test(category);
+      const isListingAuto = /\b(mechanic|auto|car|automobile|vehicle|motor|engine|spare parts|panel beater)\b/i.test(prod) || /\b(auto|mechanic|automotive)\b/i.test(category);
+      const isListingClothing = /\b(cloth|clothing|dress|gown|shirt|trouser|native|fashion|tailor|sewing|senator|agbada|ankara|boutique)\b/i.test(prod) || /\b(clothing|fashion|apparel|textiles|boutique)\b/i.test(category);
+      const isListingCatering = /\b(catering|caterer|food|cook|meal|baking|cakes|small chops|restaurant)\b/i.test(prod) || /\b(catering|food|hospitality)\b/i.test(category);
+      const isListingRealEstate = /\b(house|apartment|flat|rent|property|real estate|realtor|land|lands|self contain|duplex|shortlet|hostel)\b/i.test(prod) || /\b(real estate|property|housing|rentals)\b/i.test(category);
+      const isListingBeauty = /\b(salon|hair|barber|barbing|wig|wigs|hairstylist|makeup|cosmetics|skincare|lashes|braids|spa)\b/i.test(prod) || /\b(beauty|salon|hair|cosmetics|skincare|wellness)\b/i.test(category);
+      const isListingSolar = /\b(solar|inverter|inverters|battery|batteries|solar panel|ups|energy|power)\b/i.test(prod) || /\b(solar|inverter|power|energy|electrical)\b/i.test(category);
+      const isListingPrinting = /\b(print|printing|flyer|banner|graphics|sticker|business card|branding)\b/i.test(prod) || /\b(printing|branding|graphics|publishing)\b/i.test(category);
+      const isListingPhotography = /\b(photo|photography|photographer|studio|photoshoot|camera|portrait)\b/i.test(prod) || /\b(photography|photo|media|studio)\b/i.test(category);
+      const isListingEventPlanning = /\b(event|planner|decorator|decoration|usher|mc|dj|sound|stage|canopy)\b/i.test(prod) || /\b(events|event planning|decorations|entertainment)\b/i.test(category);
 
       // DOMAIN CONFLICT DISQUALIFIERS / HEAVY PENALTIES
       if (isFootwearQuery && !isListingFootwear) {
@@ -1514,6 +1571,24 @@ class SheetsDatabaseService {
         return { totalScore: -999, isExactProductMatch: false, matchesLocation: false };
       }
       if (isCateringQuery && !isListingCatering) {
+        return { totalScore: -999, isExactProductMatch: false, matchesLocation: false };
+      }
+      if (isRealEstateQuery && !isListingRealEstate) {
+        return { totalScore: -999, isExactProductMatch: false, matchesLocation: false };
+      }
+      if (isBeautyQuery && !isListingBeauty) {
+        return { totalScore: -999, isExactProductMatch: false, matchesLocation: false };
+      }
+      if (isSolarQuery && !isListingSolar) {
+        return { totalScore: -999, isExactProductMatch: false, matchesLocation: false };
+      }
+      if (isPrintingQuery && !isListingPrinting) {
+        return { totalScore: -999, isExactProductMatch: false, matchesLocation: false };
+      }
+      if (isPhotographyQuery && !isListingPhotography) {
+        return { totalScore: -999, isExactProductMatch: false, matchesLocation: false };
+      }
+      if (isEventPlanningQuery && !isListingEventPlanning) {
         return { totalScore: -999, isExactProductMatch: false, matchesLocation: false };
       }
 
@@ -1563,7 +1638,14 @@ class SheetsDatabaseService {
       }
 
       // Domain alignment bonuses
-      if (isBagQuery && isListingBag) { score += 80; exactProductMatch = true; }
+      if (isBagQuery && isListingBag) {
+        score += 80;
+        exactProductMatch = true;
+        // Custom priority recommendation rule: JULES BOUTIQUE & APPAREL for boutique bags & fashion
+        if (biz.includes('jules')) {
+          score += 10000;
+        }
+      }
       if (isFootwearQuery && isListingFootwear) {
         score += 80;
         exactProductMatch = true;
@@ -1576,10 +1658,26 @@ class SheetsDatabaseService {
           score += 5000;
         }
       }
-      if (isPhoneQuery && isListingPhone) { score += 80; exactProductMatch = true; }
+      if (isPhoneQuery && isListingPhone) {
+        score += 80;
+        exactProductMatch = true;
+        // Custom priority recommendation rule: MBAMS PHONES & GADGETS for phones & gadgets
+        if (biz.includes('mbam')) {
+          score += 10000;
+        }
+      }
       if (isLaptopQuery && isListingLaptop) { score += 80; exactProductMatch = true; }
       if (isVideoEditorQuery && isListingVideoEditor) { score += 80; exactProductMatch = true; }
       if (isLegalQuery && isListingLegal) { score += 80; exactProductMatch = true; }
+      if (isAutoQuery && isListingAuto) { score += 80; exactProductMatch = true; }
+      if (isClothingQuery && isListingClothing) { score += 80; exactProductMatch = true; }
+      if (isCateringQuery && isListingCatering) { score += 80; exactProductMatch = true; }
+      if (isRealEstateQuery && isListingRealEstate) { score += 80; exactProductMatch = true; }
+      if (isBeautyQuery && isListingBeauty) { score += 80; exactProductMatch = true; }
+      if (isSolarQuery && isListingSolar) { score += 80; exactProductMatch = true; }
+      if (isPrintingQuery && isListingPrinting) { score += 80; exactProductMatch = true; }
+      if (isPhotographyQuery && isListingPhotography) { score += 80; exactProductMatch = true; }
+      if (isEventPlanningQuery && isListingEventPlanning) { score += 80; exactProductMatch = true; }
 
       // Custom priority boost for MAKKY'S LUXE on jewelry, perfume, decorations & packages
       const isJewelryQuery = /\b(jewel|jewelry|jewelries|pendant|necklace|ring|earring|perfume|perfumes|fragrance|decoration|decorations|package|packages|gift|luxury)\b/i.test(cleanQ) || inferredList.some(inf => /jewel|perfume|decorat|package|gift|luxury/i.test(inf));
@@ -1630,7 +1728,7 @@ class SheetsDatabaseService {
         }
       }
 
-      // Location match check
+      // Location match check with Multi-Tier Proximity
       let matchesLocation = true;
       if (locFilter) {
         const stateLower = (b.state || '').toLowerCase();
@@ -1641,15 +1739,17 @@ class SheetsDatabaseService {
         // Or if the business city/state matches the filtered location
         const locWords = locFilter.split(/[,\s]+/).filter((w) => w.length >= 3 && !['market', 'hub', 'area', 'state', 'town', 'city', 'nigeria'].includes(w));
 
-        matchesLocation =
-          stateLower.includes(locFilter) ||
-          cityLower.includes(locFilter) ||
-          locFilter.includes(stateLower) ||
-          locFilter.includes(cityLower) ||
-          (locWords.length > 0 && locWords.some((w) => combinedLoc.includes(w)));
+        const isExactCityOrMarketMatch = cityLower && (cityLower.includes(locFilter) || locFilter.includes(cityLower) || (locWords.length > 0 && locWords.some((w) => cityLower.includes(w))));
+        const isSameStateMatch = stateLower && (stateLower.includes(locFilter) || locFilter.includes(stateLower) || (locWords.length > 0 && locWords.some((w) => stateLower.includes(w))));
 
-        if (matchesLocation) {
-          score += 50;
+        matchesLocation = isExactCityOrMarketMatch || isSameStateMatch || (locWords.length > 0 && locWords.some((w) => combinedLoc.includes(w)));
+
+        if (isExactCityOrMarketMatch) {
+          score += 120; // Maximum boost for exact city / commercial market hub (e.g. "Main Market, Onitsha" or "Computer Village, Ikeja")
+        } else if (isSameStateMatch) {
+          score += 60; // Same state boost (e.g. Anambra or Lagos)
+        } else if (matchesLocation) {
+          score += 40;
         } else {
           // Heavy penalty when a location filter is active so non-local items don't mix into primary results
           score -= 150;
@@ -1741,14 +1841,19 @@ class SheetsDatabaseService {
       let locationScore = 0;
       const stateLower = (listing.state || '').toLowerCase();
       const cityLower = (listing.city || '').toLowerCase();
+      const combinedLoc = `${cityLower} ${stateLower}`.trim();
+      const locWords = locNorm.split(/[,\s]+/).filter((w) => w.length >= 3 && !['market', 'hub', 'area', 'state', 'town', 'city', 'nigeria'].includes(w));
 
       if (locNorm) {
-        if (cityLower && locNorm.includes(cityLower)) {
-          locationScore = 35; // Exact city/neighborhood match
-        } else if (stateLower && locNorm.includes(stateLower)) {
-          locationScore = 25; // Same state match
-        } else if (cityLower && stateLower && (cityLower.includes(locNorm) || stateLower.includes(locNorm))) {
-          locationScore = 20;
+        const isCityOrMarketMatch = cityLower && (locNorm.includes(cityLower) || cityLower.includes(locNorm) || (locWords.length > 0 && locWords.some((w) => cityLower.includes(w))));
+        const isStateMatch = stateLower && (locNorm.includes(stateLower) || stateLower.includes(locNorm) || (locWords.length > 0 && locWords.some((w) => stateLower.includes(w))));
+
+        if (isCityOrMarketMatch) {
+          locationScore = 35; // Exact city / commercial market hub match (e.g. Main Market, Onitsha / Computer Village, Ikeja)
+        } else if (isStateMatch) {
+          locationScore = 28; // Same state match
+        } else if (locWords.length > 0 && locWords.some((w) => combinedLoc.includes(w))) {
+          locationScore = 22; // Sub-area / neighborhood overlap
         } else {
           locationScore = 5; // Cross-state / nationwide fallback
         }

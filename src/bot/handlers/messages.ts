@@ -10,6 +10,7 @@ import { getBusinessReplyKeyboard, isRegisteredBusiness, replySafe, findExisting
 import { startAddProductFlow, startEditProductFlow, showMyListings, startUpdateWhatsappFlow, startDeleteBusinessFlow, showMyStatsFlow } from '../flows.js';
 import { sendWelcomeMessage } from './commands.js';
 import { uploadTelegramMediaToStorage } from '../services/storageService.js';
+import { isExplicitSupportOrReport, hasSufficientReportDetails, sendReportToAdminTelegram } from '../services/supportService.js';
 
 function getBroaderTerm(keywords: string): { broader: string; original: string } {
   const lower = keywords.toLowerCase();
@@ -46,6 +47,26 @@ async function handleActiveFlowStep(
     await ctx.reply(cancelMsg, {
       reply_markup: isBiz ? getBusinessReplyKeyboard() : { remove_keyboard: true },
     });
+    return;
+  }
+
+  // Step 0: Support Report / Complaint Details Collected
+  if (step === 'AWAITING_SUPPORT_REPORT') {
+    userStore.clearFlowState(userId);
+    await sendReportToAdminTelegram(ctx, {
+      userIdentifier: String(userId),
+      userName: username,
+      platform: 'Telegram',
+      reportText: text,
+    });
+    await replySafe(
+      ctx,
+      `Thanks for letting us know, our team has been notified and will look into this right away.`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: isRegisteredBusiness(userId) ? getBusinessReplyKeyboard() : { remove_keyboard: true },
+      }
+    );
     return;
   }
 
@@ -1742,6 +1763,33 @@ export function setupMessageHandlers(bot: any) {
         reply_markup: draftResult.inlineKeyboard,
       });
       return;
+    }
+
+    // Narrow Support / Report / Complaint Trigger Check (Explicit phrases / patterns only)
+    if (isExplicitSupportOrReport(text)) {
+      if (hasSufficientReportDetails(text)) {
+        userStore.clearFlowState(userId);
+        await sendReportToAdminTelegram(ctx, {
+          userIdentifier: String(userId),
+          userName: username,
+          platform: 'Telegram',
+          reportText: text,
+        });
+        await replySafe(
+          ctx,
+          `I'm really sorry to hear that you've run into an issue. We take this very seriously.\n\nThanks for letting us know, our team has been notified and will look into this right away.`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      } else {
+        userStore.setFlowState(userId, 'AWAITING_SUPPORT_REPORT');
+        await replySafe(
+          ctx,
+          `I'm really sorry to hear that you've run into an issue or need support. We're here to help.\n\nPlease briefly describe what happened or what issue you're facing, and I'll make sure our team gets it immediately.`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
     }
 
     // Greeting & Small-Talk Handler (Intercept before buyer search)

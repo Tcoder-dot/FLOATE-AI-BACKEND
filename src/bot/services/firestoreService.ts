@@ -16,6 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import { sheetsDb, normalizePhone, BusinessListing, parsePriceToNumber, VendorMatchScore } from './sheetsService.js';
 import { extractInventoryFromVoiceOrPhoto, ExtractedInventoryData } from './aiService.js';
+import { withExternalTimeout } from './timeoutService.js';
 
 // Load Firebase configuration with static fallbacks for production container deployment
 const defaultConfig = {
@@ -232,8 +233,12 @@ export interface BuyerSearchHistoryItem {
 
 export interface BuyerAccountDoc {
   buyerId: string; // Telegram ID or WhatsApp Phone
+  whatsapp?: string;
+  role?: 'BUYER';
   channel: 'whatsapp' | 'telegram' | 'web';
   name: string;
+  hasSeenFirstContact?: boolean;
+  firstContactTimestamp?: string;
   primaryLocation?: string; // e.g. "Onitsha", "Ikeja, Lagos", "Port Harcourt"
   searchHistory: BuyerSearchHistoryItem[];
   negotiatorAccess?: boolean; // Future-proof foreign key for AI negotiator
@@ -275,23 +280,52 @@ export class FirestoreService {
   }
 
   /**
-   * Syncs / seeds merchants from Google Sheets listings into Firestore
+   * Primary Data Migration: Migrates existing business listings from Google Sheets into Firestore (merchants and products collections).
+   * Google Sheets becomes a passive backup.
    */
-  public async syncMerchantsFromListings(listings: BusinessListing[]): Promise<void> {
-    try {
-      for (const listing of listings) {
-        const merchantId = listing.id || listing.whatsapp || normalizePhone(listing.whatsapp);
-        if (!merchantId) continue;
+  public async migrateSheetsToFirestore(): Promise<{
+    success: boolean;
+    totalListingsFound: number;
+    merchantsMigrated: number;
+    productsMigrated: number;
+    sampleMerchants: string[];
+    timestamp: string;
+    error?: string;
+  }> {
+    return withExternalTimeout<{
+      success: boolean;
+      totalListingsFound: number;
+      merchantsMigrated: number;
+      productsMigrated: number;
+      sampleMerchants: string[];
+      timestamp: string;
+      error?: string;
+    }>(
+      async () => {
+        console.log('[Migration] Starting migration from Google Sheets to Firestore...');
+        let listings = await sheetsDb.getAllListings();
+        if (!listings || listings.length === 0) {
+          listings = await sheetsDb.syncListingsFromSheets();
+        }
 
-        const merchantRef = doc(db, 'merchants', merchantId);
-        const snap = await getDoc(merchantRef);
+        console.log(`[Migration] Found ${listings.length} listings to migrate into Firestore.`);
+        let merchantsCount = 0;
+        let productsCount = 0;
+        const sampleMerchants: string[] = [];
 
-        const tgId = listing.telegramId || listing.userId;
-        const cDate = listing.claimDate || new Date().toISOString().split('T')[0];
-        const vStatus: 'YES' | 'PENDING' = listing.verifiedStatus || (listing.isVerified ? 'YES' : 'PENDING');
+        for (const listing of listings) {
+          const merchantId = listing.id || listing.whatsapp || normalizePhone(listing.whatsapp);
+          if (!merchantId) continue;
 
-        if (!snap.exists()) {
-          const newMerchant: MerchantDoc = {
+          // A. Merchant Document
+          const merchantRef = doc(db, 'merchants', merchantId);
+          const snap = await getDoc(merchantRef);
+
+          const tgId = listing.telegramId || listing.userId;
+          const cDate = listing.claimDate || new Date().toISOString().split('T')[0];
+          const vStatus: 'YES' | 'PENDING' = listing.verifiedStatus || (listing.isVerified ? 'YES' : 'PENDING');
+
+          const merchantDoc: MerchantDoc = {
             id: merchantId,
             businessName: listing.businessName || '',
             ownerFullName: listing.ownerFullName || '',
@@ -300,99 +334,214 @@ export class FirestoreService {
             telegramId: tgId ?? '',
             claimDate: cDate || '',
             verifiedStatus: vStatus,
-            state: listing.state || '',
-            city: listing.city || '',
-            category: listing.category || '',
-            listingType: listing.listingType || '',
+            state: listing.state || 'General',
+            city: listing.city || 'General',
+            category: listing.category || 'General',
+            listingType: listing.listingType || 'Product',
             isVerified: vStatus === 'YES' || listing.isVerified || false,
-            credit_balance: this.defaultInitialCredits,
+            credit_balance: snap.exists() ? ((snap.data() as any).credit_balance ?? 1000) : 1000,
             status: 'ACTIVE',
             updatedAt: new Date().toISOString(),
           };
-          await setDoc(merchantRef, this.sanitizeForFirestore(newMerchant));
-        } else {
-          // Update verification/telegram details if changed
-          const updates: Partial<MerchantDoc> = {
-            updatedAt: new Date().toISOString(),
-          };
-          if (listing.ownerFullName) updates.ownerFullName = listing.ownerFullName;
-          if (listing.userId !== undefined) updates.userId = listing.userId;
-          if (tgId !== undefined) updates.telegramId = tgId;
-          if (cDate !== undefined) updates.claimDate = cDate;
-          if (vStatus !== undefined) {
-            updates.verifiedStatus = vStatus;
-            updates.isVerified = vStatus === 'YES';
+
+          await setDoc(merchantRef, this.sanitizeForFirestore(merchantDoc), { merge: true });
+          merchantsCount++;
+          if (sampleMerchants.length < 5 && listing.businessName) {
+            sampleMerchants.push(listing.businessName);
           }
-          await updateDoc(merchantRef, this.sanitizeForFirestore(updates));
+
+          // B. Product Document
+          if (listing.product || listing.businessName) {
+            const prodId = `prod_${merchantId}_${(listing.product || 'main').toLowerCase().replace(/[^a-z0-9]+/g, '_')}`;
+            const prodDoc: ProductDoc = {
+              id: prodId,
+              merchantId: merchantId,
+              userId: listing.userId ?? '',
+              businessName: listing.businessName || '',
+              whatsapp: listing.whatsapp || '',
+              state: listing.state || 'General',
+              city: listing.city || 'General',
+              listingType: (listing.listingType as any) === 'Service' ? 'Service' : 'Product',
+              category: listing.category || 'General',
+              product: listing.product || listing.businessName,
+              price: listing.price || 'Contact for price',
+              numericPrice: parsePriceToNumber(listing.price || ''),
+              negotiation: listing.negotiation === 'No' ? 'No' : 'Yes',
+              quantity: 1,
+              updatedAt: new Date().toISOString(),
+            };
+            await setDoc(doc(db, 'products', prodId), this.sanitizeForFirestore(prodDoc), { merge: true });
+            productsCount++;
+          }
         }
+
+        console.log(`[Migration Complete] Successfully migrated ${merchantsCount} merchants and ${productsCount} products into Firestore.`);
+        return {
+          success: true,
+          totalListingsFound: listings.length,
+          merchantsMigrated: merchantsCount,
+          productsMigrated: productsCount,
+          sampleMerchants,
+          timestamp: new Date().toISOString(),
+        };
+      },
+      {
+        timeoutMs: 9500,
+        serviceName: 'Firestore',
+        operationName: 'migrateSheetsToFirestore',
+        fallbackValue: {
+          success: false,
+          totalListingsFound: 0,
+          merchantsMigrated: 0,
+          productsMigrated: 0,
+          sampleMerchants: [],
+          timestamp: new Date().toISOString(),
+          error: 'Migration timed out after 9.5s; safe fallback engaged.',
+        },
       }
-    } catch (err) {
-      console.warn('[Firestore] Error syncing merchants from listings:', err);
-    }
+    );
+  }
+
+  /**
+   * Syncs / seeds merchants from Google Sheets listings into Firestore
+   */
+  public async syncMerchantsFromListings(listings: BusinessListing[]): Promise<void> {
+    return withExternalTimeout(
+      async () => {
+        for (const listing of listings) {
+          const merchantId = listing.id || listing.whatsapp || normalizePhone(listing.whatsapp);
+          if (!merchantId) continue;
+
+          const merchantRef = doc(db, 'merchants', merchantId);
+          const snap = await getDoc(merchantRef);
+
+          const tgId = listing.telegramId || listing.userId;
+          const cDate = listing.claimDate || new Date().toISOString().split('T')[0];
+          const vStatus: 'YES' | 'PENDING' = listing.verifiedStatus || (listing.isVerified ? 'YES' : 'PENDING');
+
+          if (!snap.exists()) {
+            const newMerchant: MerchantDoc = {
+              id: merchantId,
+              businessName: listing.businessName || '',
+              ownerFullName: listing.ownerFullName || '',
+              whatsapp: listing.whatsapp || '',
+              userId: listing.userId ?? '',
+              telegramId: tgId ?? '',
+              claimDate: cDate || '',
+              verifiedStatus: vStatus,
+              state: listing.state || '',
+              city: listing.city || '',
+              category: listing.category || '',
+              listingType: listing.listingType || '',
+              isVerified: vStatus === 'YES' || listing.isVerified || false,
+              credit_balance: this.defaultInitialCredits,
+              status: 'ACTIVE',
+              updatedAt: new Date().toISOString(),
+            };
+            await setDoc(merchantRef, this.sanitizeForFirestore(newMerchant));
+          } else {
+            const updates: Partial<MerchantDoc> = {
+              updatedAt: new Date().toISOString(),
+            };
+            if (listing.ownerFullName) updates.ownerFullName = listing.ownerFullName;
+            if (listing.userId !== undefined) updates.userId = listing.userId;
+            if (tgId !== undefined) updates.telegramId = tgId;
+            if (cDate !== undefined) updates.claimDate = cDate;
+            if (vStatus !== undefined) {
+              updates.verifiedStatus = vStatus;
+              updates.isVerified = vStatus === 'YES';
+            }
+            await updateDoc(merchantRef, this.sanitizeForFirestore(updates));
+          }
+        }
+      },
+      {
+        timeoutMs: 8500,
+        serviceName: 'Firestore',
+        operationName: 'syncMerchantsFromListings',
+        fallbackValue: undefined,
+      }
+    );
   }
 
   /**
    * Synchronizes and logs buyer search query directly into Firestore search_logs collection
    */
   public async logSearch(data: Omit<SearchLogDoc, 'id'>): Promise<void> {
-    try {
-      const id = `search-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-      const docData: SearchLogDoc = {
-        id,
-        buyerTelegramId: data.buyerTelegramId ?? '',
-        buyerName: data.buyerName || '',
-        searchedProduct: data.searchedProduct || '',
-        searchedPrice: data.searchedPrice || '',
-        searchedLocation: data.searchedLocation || '',
-        matchFound: data.matchFound || 'No',
-        numberOfMatches: data.numberOfMatches || 0,
-        timestamp: data.timestamp || new Date().toISOString(),
-      };
-      await setDoc(doc(db, 'search_logs', id), this.sanitizeForFirestore(docData));
-    } catch (err) {
-      console.warn('[Firestore] Error logging buyer search:', err);
-    }
+    return withExternalTimeout(
+      async () => {
+        const id = `search-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+        const docData: SearchLogDoc = {
+          id,
+          buyerTelegramId: data.buyerTelegramId ?? '',
+          buyerName: data.buyerName || '',
+          searchedProduct: data.searchedProduct || '',
+          searchedPrice: data.searchedPrice || '',
+          searchedLocation: data.searchedLocation || '',
+          matchFound: data.matchFound || 'No',
+          numberOfMatches: data.numberOfMatches || 0,
+          timestamp: data.timestamp || new Date().toISOString(),
+        };
+        await setDoc(doc(db, 'search_logs', id), this.sanitizeForFirestore(docData));
+      },
+      {
+        timeoutMs: 8500,
+        serviceName: 'Firestore',
+        operationName: 'logSearch',
+        fallbackValue: undefined,
+      }
+    );
   }
 
   /**
    * Retrieves all merchants for admin review
    */
   public async getAllMerchantsForAdmin(): Promise<MerchantDoc[]> {
-    try {
-      const q = collection(db, 'merchants');
-      const snap = await getDocs(q);
-      const list: MerchantDoc[] = [];
-      snap.forEach((d) => list.push(d.data() as MerchantDoc));
-      return list;
-    } catch (err) {
-      console.error('[Firestore] Error fetching all merchants for admin:', err);
-      return [];
-    }
+    return withExternalTimeout(
+      async () => {
+        const q = collection(db, 'merchants');
+        const snap = await getDocs(q);
+        const list: MerchantDoc[] = [];
+        snap.forEach((d) => list.push(d.data() as MerchantDoc));
+        return list;
+      },
+      {
+        timeoutMs: 8500,
+        serviceName: 'Firestore',
+        operationName: 'getAllMerchantsForAdmin',
+        fallbackValue: [],
+      }
+    );
   }
 
   /**
    * Retrieves a merchant by ID or WhatsApp
    */
   public async getMerchant(merchantId: string): Promise<MerchantDoc | null> {
-    try {
-      const snap = await getDoc(doc(db, 'merchants', merchantId));
-      if (snap.exists()) {
-        return snap.data() as MerchantDoc;
-      }
-      // Try search by whatsapp
-      const normPhone = normalizePhone(merchantId);
-      if (normPhone) {
-        const q = query(collection(db, 'merchants'), where('whatsapp', '==', normPhone));
-        const qSnap = await getDocs(q);
-        if (!qSnap.empty) {
-          return qSnap.docs[0].data() as MerchantDoc;
+    return withExternalTimeout(
+      async () => {
+        const snap = await getDoc(doc(db, 'merchants', merchantId));
+        if (snap.exists()) {
+          return snap.data() as MerchantDoc;
         }
+        // Try search by whatsapp
+        const normPhone = normalizePhone(merchantId);
+        if (normPhone) {
+          const q = query(collection(db, 'merchants'), where('whatsapp', '==', normPhone));
+          const qSnap = await getDocs(q);
+          if (!qSnap.empty) {
+            return qSnap.docs[0].data() as MerchantDoc;
+          }
+        }
+        return null;
+      },
+      {
+        timeoutMs: 8500,
+        serviceName: 'Firestore',
+        operationName: `getMerchant_${merchantId}`,
+        fallbackValue: null,
       }
-      return null;
-    } catch (err) {
-      console.error(`[Firestore] Error fetching merchant ${merchantId}:`, err);
-      return null;
-    }
+    );
   }
 
   /**
@@ -400,25 +549,30 @@ export class FirestoreService {
    * Bypasses credit balance checks when MONETIZATION_ENABLED is false (Launch Phase)
    */
   public async getActiveMerchants(): Promise<MerchantDoc[]> {
-    try {
-      const q = FirestoreService.MONETIZATION_ENABLED
-        ? query(
-            collection(db, 'merchants'),
-            where('status', '==', 'ACTIVE'),
-            where('credit_balance', '>=', this.leadCostNGN)
-          )
-        : query(
-            collection(db, 'merchants'),
-            where('status', '==', 'ACTIVE')
-          );
-      const snap = await getDocs(q);
-      const list: MerchantDoc[] = [];
-      snap.forEach((d) => list.push(d.data() as MerchantDoc));
-      return list;
-    } catch (err) {
-      console.error('[Firestore] Error getting active merchants:', err);
-      return [];
-    }
+    return withExternalTimeout(
+      async () => {
+        const q = FirestoreService.MONETIZATION_ENABLED
+          ? query(
+              collection(db, 'merchants'),
+              where('status', '==', 'ACTIVE'),
+              where('credit_balance', '>=', this.leadCostNGN)
+            )
+          : query(
+              collection(db, 'merchants'),
+              where('status', '==', 'ACTIVE')
+            );
+        const snap = await getDocs(q);
+        const list: MerchantDoc[] = [];
+        snap.forEach((d) => list.push(d.data() as MerchantDoc));
+        return list;
+      },
+      {
+        timeoutMs: 8500,
+        serviceName: 'Firestore',
+        operationName: 'getActiveMerchants',
+        fallbackValue: [],
+      }
+    );
   }
 
   /**
@@ -1126,16 +1280,21 @@ export class FirestoreService {
    * Reads all active product listings directly from Firestore
    */
   public async getProductsFromFirestore(): Promise<ProductDoc[]> {
-    try {
-      const q = collection(db, 'products');
-      const snap = await getDocs(q);
-      const list: ProductDoc[] = [];
-      snap.forEach((d) => list.push(d.data() as ProductDoc));
-      return list;
-    } catch (err) {
-      console.error('[Firestore] Error fetching products:', err);
-      return [];
-    }
+    return withExternalTimeout(
+      async () => {
+        const q = collection(db, 'products');
+        const snap = await getDocs(q);
+        const list: ProductDoc[] = [];
+        snap.forEach((d) => list.push(d.data() as ProductDoc));
+        return list;
+      },
+      {
+        timeoutMs: 8500,
+        serviceName: 'Firestore',
+        operationName: 'getProductsFromFirestore',
+        fallbackValue: [],
+      }
+    );
   }
 
   /**
@@ -1830,6 +1989,158 @@ export class FirestoreService {
   }
 
   /**
+   * STEP 2: Checks if a WhatsApp number is brand new (never had first contact or business registration before)
+   */
+  public async isFirstContactForWhatsAppNumber(phone: string): Promise<boolean> {
+    const cleanPhone = normalizePhone(phone);
+    if (!cleanPhone) return false;
+
+    return await withExternalTimeout(
+      async () => {
+        try {
+          // 1. Check if number exists in buyers collection with hasSeenFirstContact === true
+          const buyerRef = doc(db, 'buyers', cleanPhone);
+          const buyerSnap = await getDoc(buyerRef);
+          if (buyerSnap.exists()) {
+            const buyerData = buyerSnap.data() as BuyerAccountDoc;
+            if (buyerData.hasSeenFirstContact) {
+              return false;
+            }
+          }
+
+          // 2. Check if number is registered as a merchant
+          const merchant = await this.getMerchant(cleanPhone);
+          if (merchant) {
+            return false;
+          }
+
+          // Not found in either collection -> brand new number!
+          return true;
+        } catch (err) {
+          console.warn(`[Firestore] Notice checking first contact for ${cleanPhone}:`, err);
+          return false;
+        }
+      },
+      {
+        timeoutMs: 8500,
+        serviceName: 'Firestore',
+        operationName: 'isFirstContactForWhatsAppNumber',
+        fallbackValue: false,
+      }
+    );
+  }
+
+  /**
+   * Retrieves a buyer document by phone number
+   */
+  public async getBuyer(phone: string): Promise<BuyerAccountDoc | null> {
+    const cleanPhone = normalizePhone(phone);
+    try {
+      const buyerRef = doc(db, 'buyers', cleanPhone);
+      const snap = await getDoc(buyerRef);
+      if (snap.exists()) {
+        return snap.data() as BuyerAccountDoc;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * STEP 2: Records first contact timestamp and marks brand new number in buyers collection
+   */
+  public async recordFirstContact(phone: string, name?: string): Promise<BuyerAccountDoc> {
+    const cleanPhone = normalizePhone(phone);
+    const now = new Date().toISOString();
+
+    const buyerDoc: BuyerAccountDoc = {
+      buyerId: cleanPhone,
+      whatsapp: cleanPhone,
+      role: 'BUYER',
+      channel: 'whatsapp',
+      name: name && name !== 'Customer' ? name : 'Customer',
+      hasSeenFirstContact: true,
+      firstContactTimestamp: now,
+      searchHistory: [],
+      negotiatorAccess: false,
+      createdAt: now,
+      lastActiveAt: now,
+    };
+
+    try {
+      const buyerRef = doc(db, 'buyers', cleanPhone);
+      await setDoc(buyerRef, this.sanitizeForFirestore(buyerDoc), { merge: true });
+    } catch (err) {
+      console.warn(`[Firestore] Notice recording first contact for ${cleanPhone}:`, err);
+    }
+
+    return buyerDoc;
+  }
+
+  /**
+   * STEP 2: Saves a newly registered business into Firestore merchants collection
+   */
+  public async registerBusinessAccount(params: {
+    whatsapp: string;
+    businessName: string;
+    ownerFullName?: string;
+    category: string;
+    state: string;
+    city: string;
+    firstProduct?: string;
+    firstPrice?: string;
+  }): Promise<MerchantDoc> {
+    const cleanPhone = normalizePhone(params.whatsapp);
+    const now = new Date().toISOString();
+    const today = now.split('T')[0];
+
+    const merchantDoc: MerchantDoc = {
+      id: cleanPhone,
+      businessName: params.businessName.trim(),
+      ownerFullName: params.ownerFullName?.trim() || params.businessName.trim(),
+      whatsapp: cleanPhone,
+      state: params.state.trim(),
+      city: params.city.trim(),
+      category: params.category.trim(),
+      listingType: 'Product',
+      isVerified: true,
+      verifiedStatus: 'YES',
+      credit_balance: 1000,
+      status: 'ACTIVE',
+      claimDate: today,
+      updatedAt: now,
+    };
+
+    try {
+      // 1. Save to merchants collection keyed by WhatsApp number
+      const merchantRef = doc(db, 'merchants', cleanPhone);
+      await setDoc(merchantRef, this.sanitizeForFirestore(merchantDoc));
+      console.log(`[Firestore] Successfully registered business "${params.businessName}" (${cleanPhone}) in merchants collection`);
+
+      // 2. Also save initial product if provided
+      if (params.firstProduct) {
+        await this.saveProductListing({
+          userId: cleanPhone,
+          businessName: params.businessName,
+          whatsapp: cleanPhone,
+          state: params.state,
+          city: params.city,
+          category: params.category,
+          product: params.firstProduct,
+          price: params.firstPrice || 'Market Rate',
+          listingType: 'Product',
+          negotiation: 'Yes',
+        });
+      }
+    } catch (err) {
+      console.error(`[Firestore] Error registering business account for ${cleanPhone}:`, err);
+    }
+
+    return merchantDoc;
+  }
+
+  /**
    * Record search in buyer's search history
    */
   public async recordBuyerSearch(
@@ -1863,6 +2174,19 @@ export class FirestoreService {
       }
     } catch (err) {
       console.warn(`[Firestore] Notice recording search history for buyer ${cleanId}:`, err);
+    }
+  }
+
+  /**
+   * Record or update a Floate Secure Line relay session
+   */
+  public async saveRelaySessionDoc(session: any): Promise<void> {
+    if (!session || !session.id) return;
+    try {
+      const relayRef = doc(db, 'relay_sessions', String(session.id));
+      await setDoc(relayRef, this.sanitizeForFirestore(session), { merge: true });
+    } catch (err) {
+      console.warn(`[Firestore] Notice saving relay session ${session.id}:`, err);
     }
   }
 }

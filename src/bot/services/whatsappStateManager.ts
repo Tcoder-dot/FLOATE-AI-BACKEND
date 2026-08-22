@@ -54,6 +54,35 @@ export interface WhatsAppVendorEditDraft {
   updatedAt: string;
 }
 
+export interface RelayMessage {
+  senderRole: 'BUYER' | 'VENDOR';
+  senderPhone: string;
+  text: string;
+  timestamp: string;
+}
+
+export interface RelaySession {
+  id: string;
+  buyerPhone: string;
+  buyerName: string;
+  vendorPhone: string;
+  vendorName: string;
+  vendorId: string;
+  item: string;
+  price?: string;
+  status: 'ACTIVE' | 'AGREEMENT_PENDING' | 'ENDED';
+  messages: RelayMessage[];
+  agreementDetails?: {
+    item: string;
+    agreedPrice: string;
+    terms?: string;
+    detectedAt: string;
+  };
+  paymentOptionChosen?: 'SAFEPAY' | 'DIRECT';
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface WhatsAppSearchState {
   lastQuery?: string;
   cleanProduct?: string;
@@ -67,10 +96,15 @@ export interface WhatsAppSearchState {
 export interface WhatsAppUserSessionState {
   state:
     | 'IDLE'
+    | 'RELAY_CHAT'
     | 'AWAITING_ROLE_SELECTION'
     | 'AWAITING_PRIMARY_LOCATION'
     | 'AWAITING_LOCATION_CHANGE'
     | 'AWAITING_SAVE_CONTACT'
+    | 'REG_STEP_1_BIZ_NAME'
+    | 'REG_STEP_2_CATEGORY'
+    | 'REG_STEP_3_LOCATION'
+    | 'REG_STEP_4_PRODUCT'
     | 'QUALIFYING_VOLUME'
     | 'QUALIFYING_FULFILLMENT'
     | 'QUALIFYING_LOCATION'
@@ -81,9 +115,11 @@ export interface WhatsAppUserSessionState {
     | 'VENDOR_ADD_PRODUCT'
     | 'VENDOR_EDIT_PRODUCTS'
     | 'VENDOR_DELETE_CONFIRM';
+  activeRelayId?: string;
   activeVendorId?: string;
   activeVendorName?: string;
   activeVendorPhone?: string;
+  activeBuyerPhone?: string;
   activeItem?: string;
   orderVolume?: 'Retail' | 'Wholesale';
   fulfillment?: 'Shop Visit' | 'Local City Delivery' | 'Interstate Waybill';
@@ -96,6 +132,7 @@ export interface WhatsAppUserSessionState {
   vendorEditDraft?: WhatsAppVendorEditDraft;
   hasReceivedContactCard?: boolean;
   hasSeenSaveTip?: boolean;
+  pendingInitialText?: string;
   pendingIntent?: {
     action: 'REGISTER_VENDOR' | 'CONNECT_VENDOR' | 'SEARCH' | 'GREETING';
     payload?: any;
@@ -105,6 +142,44 @@ export interface WhatsAppUserSessionState {
 
 // In-memory active sessions store for ultra-fast conversational state routing
 const waSessions = new Map<string, WhatsAppUserSessionState>();
+
+// In-memory active relay sessions store
+const activeRelaySessions = new Map<string, RelaySession>();
+const phoneToRelayIdMap = new Map<string, string>();
+
+export function getActiveRelaySession(phone: string): RelaySession | null {
+  const clean = phone.replace(/\D/g, '');
+  const relayId = phoneToRelayIdMap.get(clean);
+  if (!relayId) return null;
+  const session = activeRelaySessions.get(relayId);
+  if (!session || session.status === 'ENDED') {
+    phoneToRelayIdMap.delete(clean);
+    return null;
+  }
+  return session;
+}
+
+export function saveRelaySession(session: RelaySession): void {
+  activeRelaySessions.set(session.id, session);
+  const cleanBuyer = session.buyerPhone.replace(/\D/g, '');
+  const cleanVendor = session.vendorPhone.replace(/\D/g, '');
+  if (session.status !== 'ENDED') {
+    phoneToRelayIdMap.set(cleanBuyer, session.id);
+    phoneToRelayIdMap.set(cleanVendor, session.id);
+  } else {
+    phoneToRelayIdMap.delete(cleanBuyer);
+    phoneToRelayIdMap.delete(cleanVendor);
+  }
+}
+
+export function endRelaySession(sessionId: string): RelaySession | null {
+  const session = activeRelaySessions.get(sessionId);
+  if (!session) return null;
+  session.status = 'ENDED';
+  session.updatedAt = new Date().toISOString();
+  saveRelaySession(session);
+  return session;
+}
 
 export function getWhatsAppSession(phone: string): WhatsAppUserSessionState {
   const clean = phone.replace(/\D/g, '');

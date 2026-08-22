@@ -1,33 +1,54 @@
 import React, { useState } from 'react';
-import { Send, Bot as BotIcon, User, RefreshCw, Sparkles, CheckCircle2, AlertCircle, Terminal, Play } from 'lucide-react';
+import { Send, Bot as BotIcon, RefreshCw, Sparkles, Terminal, Smartphone, MessageSquare, PlusCircle } from 'lucide-react';
 
 interface ChatMessage {
   id: string;
   sender: 'user' | 'bot';
   text: string;
   replyMarkup?: any;
+  quickReplies?: Array<{ id: string; title: string }>;
+  listMenu?: {
+    buttonText: string;
+    title?: string;
+    sections: Array<{
+      title: string;
+      rows: Array<{ id: string; title: string; description?: string }>;
+    }>;
+  };
+  ctaUrl?: { displayText: string; url: string };
   timestamp: string;
 }
 
 export function BotTester() {
+  const [channel, setChannel] = useState<'whatsapp' | 'telegram'>('whatsapp');
+  const [phoneNumber, setPhoneNumber] = useState('23480' + Math.floor(1000000 + Math.random() * 9000000));
+  const [senderName, setSenderName] = useState('Chukwuemeka');
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: '1',
       sender: 'bot',
-      text: '👋 Welcome to Telegram Bot Logic Tester!\n\nSend a command or text below to test your bot logic handlers.',
-      replyMarkup: {
-        inline_keyboard: [
-          [{ text: '🤖 Ask AI', callback_data: 'cmd_ask_ai' }, { text: '📊 Bot Status', callback_data: 'cmd_status' }],
-          [{ text: '❓ Help', callback_data: 'cmd_help' }, { text: '⚙️ Settings', callback_data: 'cmd_settings' }],
-        ],
-      },
+      text: '🟢 Floate AI Live Conversational Engine ready.\n\nType any message or click one of the quick test buttons below to test Step 2 First Contact and Identity routing.',
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     },
   ]);
 
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [logs, setLogs] = useState<string[]>(['[System] Bot Logic Tester ready.']);
+  const [logs, setLogs] = useState<string[]>(['[System] Floate Conversational Simulator ready. Channel: WhatsApp.']);
+
+  const generateNewNumber = () => {
+    const randomNum = '23480' + Math.floor(1000000 + Math.random() * 9000000);
+    setPhoneNumber(randomNum);
+    setMessages([
+      {
+        id: Date.now().toString(),
+        sender: 'bot',
+        text: `📱 Switched to brand-new WhatsApp number: +${randomNum}\nSend any message (e.g. "Hi" or "I need shoes") to test Step 2 First Contact.`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      },
+    ]);
+    setLogs((prev) => [...prev, `[Session Reset] Switched to new clean number: +${randomNum}`]);
+  };
 
   const sendMessage = async (textToSend?: string) => {
     const text = textToSend || input;
@@ -48,7 +69,13 @@ export function BotTester() {
       const res = await fetch('/api/bot/simulate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, firstName: 'Developer' }),
+        body: JSON.stringify({
+          message: text,
+          phone: phoneNumber,
+          userId: phoneNumber,
+          firstName: senderName,
+          channel,
+        }),
       });
 
       const data = await res.json();
@@ -64,6 +91,9 @@ export function BotTester() {
             sender: 'bot',
             text: reply.text,
             replyMarkup: reply.replyMarkup,
+            quickReplies: reply.quickReplies,
+            listMenu: reply.listMenu,
+            ctaUrl: reply.ctaUrl,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           };
           setMessages((prev) => [...prev, botMsg]);
@@ -100,51 +130,149 @@ export function BotTester() {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      {/* Telegram Chat Simulation */}
-      <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col h-[650px] shadow-xl overflow-hidden">
+      {/* WhatsApp / Telegram Chat Simulation */}
+      <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col h-[680px] shadow-xl overflow-hidden">
         {/* Chat Header */}
-        <div className="bg-slate-800/80 backdrop-blur px-5 py-3 border-b border-slate-700/60 flex items-center justify-between">
+        <div className="bg-slate-800/90 backdrop-blur px-5 py-3 border-b border-slate-700/60 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-sky-400">
-              <BotIcon className="w-5 h-5" />
+            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold ${
+              channel === 'whatsapp'
+                ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-400'
+                : 'bg-sky-500/20 border border-sky-500/40 text-sky-400'
+            }`}>
+              {channel === 'whatsapp' ? <Smartphone className="w-5 h-5" /> : <BotIcon className="w-5 h-5" />}
             </div>
             <div>
-              <h3 className="font-semibold text-slate-100 text-sm">Telegram Bot Logic Handler</h3>
-              <p className="text-xs text-sky-400 font-medium flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                Webhook Handler Listening
+              <div className="flex items-center gap-2">
+                <h3 className="font-semibold text-slate-100 text-sm">
+                  {channel === 'whatsapp' ? 'Floate AI WhatsApp Simulator' : 'Floate Telegram Simulator'}
+                </h3>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-medium ${
+                  channel === 'whatsapp' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-sky-950 text-sky-300 border border-sky-800'
+                }`}>
+                  {channel.toUpperCase()}
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 font-mono mt-0.5 flex items-center gap-2">
+                <span>Identity: +{phoneNumber}</span>
+                <span className="text-slate-600">•</span>
+                <span>Name: {senderName}</span>
               </p>
             </div>
           </div>
-          <button
-            onClick={() => {
-              setMessages([]);
-              setLogs(['[System] Chat log cleared.']);
-            }}
-            className="p-2 text-slate-400 hover:text-slate-200 transition-colors rounded-lg hover:bg-slate-800 text-xs flex items-center gap-1"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            Clear
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={generateNewNumber}
+              title="Generate a new phone number to test Step 2 First Contact from scratch"
+              className="px-2.5 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors"
+            >
+              <PlusCircle className="w-3.5 h-3.5" />
+              New Number
+            </button>
+            <button
+              onClick={() => {
+                setMessages([]);
+                setLogs(['[System] Chat log cleared.']);
+              }}
+              className="p-2 text-slate-400 hover:text-slate-200 transition-colors rounded-lg hover:bg-slate-800 text-xs flex items-center gap-1"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
 
-        {/* Quick Commands Bar */}
-        <div className="px-4 py-2.5 bg-slate-900/90 border-b border-slate-800 flex items-center gap-2 overflow-x-auto text-xs">
-          <span className="text-slate-400 font-mono text-[11px] uppercase tracking-wider whitespace-nowrap">Test Floate AI:</span>
-          {['/start', '🎙️ Voice Note: Where can I get leather slippers in Onitsha 15k', '/claim', '/register', '/addproduct Men Sandals 8k', 'iPhone 13 200k Enugu', '/status'].map((cmd) => (
+        {/* Identity & Channel Switcher Toolbar */}
+        <div className="px-4 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400 text-[11px] font-medium">Channel:</span>
             <button
-              key={cmd}
-              onClick={() => handleButtonClick(cmd)}
-              disabled={loading}
-              className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-sky-950 hover:text-sky-300 hover:border-sky-700 border border-slate-700 text-slate-300 font-mono whitespace-nowrap transition-colors"
+              onClick={() => setChannel('whatsapp')}
+              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                channel === 'whatsapp'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'bg-slate-800 text-slate-400 hover:text-slate-200'
+              }`}
             >
-              {cmd}
+              WhatsApp (Step 2)
             </button>
-          ))}
+            <button
+              onClick={() => setChannel('telegram')}
+              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                channel === 'telegram'
+                  ? 'bg-sky-600 text-white shadow-sm'
+                  : 'bg-slate-800 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Telegram
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-slate-500 text-[11px]">Phone:</span>
+            <input
+              type="text"
+              value={phoneNumber}
+              onChange={(e) => setPhoneNumber(e.target.value)}
+              className="bg-slate-950 border border-slate-800 text-slate-200 font-mono text-xs px-2 py-0.5 rounded w-32 outline-none focus:border-emerald-500"
+            />
+            <span className="text-slate-500 text-[11px]">Name:</span>
+            <input
+              type="text"
+              value={senderName}
+              onChange={(e) => setSenderName(e.target.value)}
+              className="bg-slate-950 border border-slate-800 text-slate-200 text-xs px-2 py-0.5 rounded w-24 outline-none focus:border-emerald-500"
+            />
+          </div>
+        </div>
+
+        {/* Quick Test Scenario Presets Bar */}
+        <div className="px-4 py-2.5 bg-slate-950/90 border-b border-slate-800 flex flex-col gap-2 text-xs">
+          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+            <span className="text-emerald-400 font-semibold text-[11px] uppercase tracking-wider whitespace-nowrap">🔍 Search & 10-Card:</span>
+            {[
+              { label: '👟 Slippers in Onitsha (Spotlight: Chivora)', val: 'Leather slippers in Onitsha' },
+              { label: '📱 iPhones in Ikeja (Spotlight: MBAMS)', val: 'iPhones in Computer Village Lagos' },
+              { label: '👜 Bags in Balogun (Spotlight: Jules)', val: 'Designer handbags in Balogun Lagos' },
+              { label: '💍 Luxury & Perfumes (Spotlight: Makky)', val: 'Perfumes and jewelry in Nigeria' },
+              { label: '💻 Laptops in Lagos', val: 'HP Core i7 laptops in Ikeja' },
+            ].map((item) => (
+              <button
+                key={item.label}
+                onClick={() => handleButtonClick(item.val)}
+                disabled={loading}
+                className="px-2.5 py-1 rounded-md bg-slate-800/90 hover:bg-emerald-950 hover:text-emerald-300 hover:border-emerald-700 border border-slate-700 text-slate-300 whitespace-nowrap transition-colors"
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2 overflow-x-auto">
+            <span className="text-sky-400 font-semibold text-[11px] uppercase tracking-wider whitespace-nowrap">⚡ Actions & Hub:</span>
+            {[
+              { label: '👋 "Hi" (First Contact)', val: 'Hi' },
+              { label: '1️⃣ Select Option #1', val: '1' },
+              { label: '📦 Personal/Retail', val: 'Personal / Retail use' },
+              { label: '🚚 Local Delivery', val: 'Local City Delivery' },
+              { label: '🏪 Merchant Hub', val: 'vendor_hub' },
+              { label: '➕ Add Product', val: 'vendor_add_product' },
+              { label: '✏️ Edit Inventory', val: 'vendor_edit_price' },
+              { label: '📊 Store Stats', val: 'vendor_analytics' },
+            ].map((item) => (
+              <button
+                key={item.label}
+                onClick={() => handleButtonClick(item.val)}
+                disabled={loading}
+                className="px-2.5 py-1 rounded-md bg-slate-800/90 hover:bg-sky-950 hover:text-sky-300 hover:border-sky-700 border border-slate-700 text-slate-300 whitespace-nowrap transition-colors"
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Message Stream */}
-        <div className="flex-1 p-5 overflow-y-auto space-y-4 bg-slate-950/40">
+        <div className="flex-1 p-5 overflow-y-auto space-y-4 bg-slate-950/60">
           {messages.map((msg) => (
             <div
               key={msg.id}
@@ -153,14 +281,80 @@ export function BotTester() {
               <div
                 className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm ${
                   msg.sender === 'user'
-                    ? 'bg-sky-600 text-white rounded-br-none'
+                    ? channel === 'whatsapp'
+                      ? 'bg-emerald-600 text-white rounded-br-none'
+                      : 'bg-sky-600 text-white rounded-br-none'
                     : 'bg-slate-800 text-slate-100 border border-slate-700/80 rounded-bl-none'
                 }`}
               >
                 <div className="whitespace-pre-wrap font-sans">{msg.text}</div>
 
-                {/* Render Inline Keyboards if present */}
-                {msg.replyMarkup?.inline_keyboard && (
+                {/* Render Quick Replies (WhatsApp Buttons - max 3) */}
+                {msg.quickReplies && msg.quickReplies.length > 0 && (
+                  <div className="mt-3 pt-2 border-t border-slate-700/60 flex flex-wrap gap-2">
+                    {msg.quickReplies.map((qr) => (
+                      <button
+                        key={qr.id}
+                        onClick={() => handleButtonClick(qr.id)}
+                        className="py-1.5 px-3 bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-700/80 text-emerald-300 hover:text-emerald-200 text-xs font-semibold rounded-lg transition-all"
+                      >
+                        {qr.title}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {/* Render Meta WhatsApp Interactive List Menu */}
+                {msg.listMenu && (
+                  <div className="mt-3 pt-2 border-t border-slate-700/60 space-y-2">
+                    <div className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5">
+                      <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
+                      {msg.listMenu.buttonText || '📋 Select Vendor'}
+                    </div>
+                    {msg.listMenu.sections.map((sec, sIdx) => (
+                      <div key={sIdx} className="bg-slate-900/90 rounded-xl p-2 border border-slate-700/60 space-y-1.5">
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 px-1">
+                          {sec.title}
+                        </div>
+                        <div className="space-y-1">
+                          {sec.rows.map((row) => (
+                            <button
+                              key={row.id}
+                              onClick={() => handleButtonClick(row.id)}
+                              className="w-full text-left p-2 rounded-lg bg-slate-800/80 hover:bg-emerald-950/70 border border-slate-700/50 hover:border-emerald-500/60 transition-all group"
+                            >
+                              <div className="text-xs font-medium text-slate-200 group-hover:text-emerald-300">
+                                {row.title}
+                              </div>
+                              {row.description && (
+                                <div className="text-[10px] text-slate-400 group-hover:text-slate-300 mt-0.5">
+                                  {row.description}
+                                </div>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Render CTA URL Button */}
+                {msg.ctaUrl && (
+                  <div className="mt-3 pt-2 border-t border-slate-700/60">
+                    <a
+                      href={msg.ctaUrl.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 py-1.5 px-3 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium rounded-lg transition-all"
+                    >
+                      🔗 {msg.ctaUrl.displayText}
+                    </a>
+                  </div>
+                )}
+
+                {/* Render Inline Keyboards if present from Telegram */}
+                {msg.replyMarkup?.inline_keyboard && !msg.quickReplies && (
                   <div className="mt-3 pt-2 border-t border-slate-700/50 space-y-1.5">
                     {msg.replyMarkup.inline_keyboard.map((row: any[], rIdx: number) => (
                       <div key={rIdx} className="flex gap-1.5">
@@ -168,7 +362,7 @@ export function BotTester() {
                           <button
                             key={bIdx}
                             onClick={() => handleButtonClick(btn.callback_data || btn.text)}
-                            className="flex-1 py-1.5 px-3 bg-slate-700/70 hover:bg-sky-600/30 hover:border-sky-500 border border-slate-600 text-sky-300 hover:text-sky-200 text-xs font-medium rounded-lg transition-all text-center"
+                            className="flex-1 py-1.5 px-3 bg-slate-700/70 hover:bg-emerald-600/30 hover:border-emerald-500 border border-slate-600 text-emerald-300 hover:text-emerald-200 text-xs font-medium rounded-lg transition-all text-center"
                           >
                             {btn.text}
                           </button>
@@ -184,33 +378,10 @@ export function BotTester() {
 
           {loading && (
             <div className="flex items-center gap-2 text-slate-400 text-xs bg-slate-800/50 p-3 rounded-xl w-max">
-              <Sparkles className="w-4 h-4 animate-spin text-sky-400" />
-              Processing Telegram handler logic...
+              <Sparkles className="w-4 h-4 animate-spin text-emerald-400" />
+              Processing conversational engine logic...
             </div>
           )}
-        </div>
-
-        {/* Quick Test Presets */}
-        <div className="px-4 py-2 bg-slate-900/80 border-t border-slate-800/80 flex flex-wrap gap-2 text-xs">
-          <span className="text-slate-500 text-[11px] self-center font-mono mr-1">Quick Test:</span>
-          <button
-            onClick={() => sendMessage('🎙️ Voice Note: I just unpacked 50 pairs of Nike Air Jordans, sizes 41–45, selling for ₦35,000 at my store in Wuse Market.')}
-            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700/60 transition-all font-sans"
-          >
-            🎙️ AI Voice Inventory Sync
-          </button>
-          <button
-            onClick={() => sendMessage('I want a smart watch in Wuse Market for 30k')}
-            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700/60 transition-all font-sans"
-          >
-            🔍 Buyer Search (Logs in Firestore)
-          </button>
-          <button
-            onClick={() => sendMessage('🎙️ Voice Note: Restocked 20 Smart Watch T800, selling for ₦28,000 in Wuse Market')}
-            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700/60 transition-all font-sans"
-          >
-            ⚡ Trigger Restock Lead Radar
-          </button>
         </div>
 
         {/* Input Bar */}
@@ -220,13 +391,13 @@ export function BotTester() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-            placeholder="Type a command (e.g., /start, /ai question) or message..."
-            className="flex-1 bg-slate-950 border border-slate-800 focus:border-sky-500 text-slate-100 text-sm rounded-xl px-4 py-2.5 outline-none font-mono"
+            placeholder={channel === 'whatsapp' ? "Type a WhatsApp message (e.g., 'Hi', 'I need shoes in Lagos', '1')..." : "Type a command or message..."}
+            className="flex-1 bg-slate-950 border border-slate-800 focus:border-emerald-500 text-slate-100 text-sm rounded-xl px-4 py-2.5 outline-none font-sans"
           />
           <button
             onClick={() => sendMessage()}
             disabled={loading || !input.trim()}
-            className="bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white p-2.5 rounded-xl transition-colors"
+            className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white p-2.5 rounded-xl transition-colors"
           >
             <Send className="w-4 h-4" />
           </button>
@@ -234,14 +405,14 @@ export function BotTester() {
       </div>
 
       {/* Execution Logs & Server Console */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col h-[650px]">
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 flex flex-col h-[680px]">
         <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
           <h4 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
             <Terminal className="w-4 h-4 text-emerald-400" />
-            Handler Debug Logs
+            Live Conversational Logs
           </h4>
           <span className="text-[10px] font-mono text-slate-400 uppercase tracking-widest bg-slate-800 px-2 py-0.5 rounded">
-            Live Console
+            Realtime
           </span>
         </div>
 
@@ -250,9 +421,9 @@ export function BotTester() {
             <div
               key={i}
               className={`leading-relaxed ${
-                log.includes('[Error]')
+                log.includes('[Error]') || log.includes('❌')
                   ? 'text-rose-400'
-                  : log.includes('[Bot Reply]')
+                  : log.includes('✅') || log.includes('Executed')
                   ? 'text-emerald-400'
                   : 'text-slate-400'
               }`}

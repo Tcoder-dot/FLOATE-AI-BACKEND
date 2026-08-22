@@ -230,23 +230,57 @@ async function startServer() {
     }
   });
 
+  // Data Migration & Status Endpoint (Step 1: Google Sheets -> Firestore Migration)
+  app.post('/api/data/migrate-sheets', async (_req, res) => {
+    try {
+      console.log('[API] /api/data/migrate-sheets invoked.');
+      const result = await firestoreDb.migrateSheetsToFirestore();
+      res.json(result);
+    } catch (err: any) {
+      console.error('[API /api/data/migrate-sheets Error]:', err);
+      res.status(500).json({ success: false, error: err?.message || 'Migration failed' });
+    }
+  });
+
+  app.get('/api/data/status', async (_req, res) => {
+    try {
+      const merchants = await firestoreDb.getActiveMerchants();
+      const products = await firestoreDb.getProductsFromFirestore();
+      res.json({
+        primaryDatabase: 'Firestore',
+        backupDatabase: 'Google Sheets (Passive)',
+        totalActiveMerchants: merchants.length,
+        totalProducts: products.length,
+        sampleMerchants: merchants.slice(0, 5).map((m) => m.businessName),
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to get data status' });
+    }
+  });
+
   // 4. Live Bot Simulator Endpoint (Test Bot Logic Programmatically)
   app.post('/api/bot/simulate', async (req, res) => {
     try {
-      const { message, userId, firstName } = req.body;
+      const { message, userId, phone, firstName, channel } = req.body;
       if (!message || typeof message !== 'string') {
         res.status(400).json({ error: 'Field "message" is required and must be a string' });
         return;
       }
 
+      const activeUserId = phone || userId || '2348012345678';
+      const activeChannel = channel || 'whatsapp';
+
       const result = await processSimulatedMessage(
         message,
-        userId ? Number(userId) : 99912345,
-        firstName || 'Tester'
+        activeUserId,
+        firstName || 'Customer',
+        activeChannel
       );
 
       res.json(result);
     } catch (err: any) {
+      console.error('[Simulate Error]:', err);
       res.status(500).json({ error: err?.message || 'Simulation failed' });
     }
   });

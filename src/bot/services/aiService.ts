@@ -1,15 +1,8 @@
 import { GoogleGenAI } from '@google/genai';
 import { config } from '../config.js';
+import { withExternalTimeout } from './timeoutService.js';
 
 let aiInstance: GoogleGenAI | null = null;
-
-/** Helper function to guarantee AI calls time out within specified milliseconds */
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number = 5000, fallback: T): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), timeoutMs)),
-  ]);
-}
 
 function getAIClient(): GoogleGenAI | null {
   const activeKey = process.env.GEMINI_API_KEY || config.geminiApiKey;
@@ -25,28 +18,37 @@ function getAIClient(): GoogleGenAI | null {
 }
 
 /**
- * Executes a Gemini generateContent request with automatic model fallbacks when facing quota (429) or high demand (503) errors.
+ * Executes a Gemini generateContent request with automatic model fallbacks and an explicit 8-10s timeout.
  */
 async function generateContentWithFallback(
   ai: GoogleGenAI,
   requestParams: Omit<Parameters<typeof ai.models.generateContent>[0], 'model'>,
   modelsToTry: string[] = ['gemini-3.1-flash-lite', 'gemini-3.6-flash', 'gemini-flash-latest']
 ) {
-  let lastError: any = null;
-  for (const modelName of modelsToTry) {
-    try {
-      const response = await ai.models.generateContent({
-        ...requestParams,
-        model: modelName,
-      });
-      return response;
-    } catch (err: any) {
-      lastError = err;
-      const errMsg = err?.message || String(err);
-      console.log(`[Gemini AI Info] Model "${modelName}" status (${errMsg.slice(0, 80)}). Trying fallback model...`);
+  return withExternalTimeout(
+    async () => {
+      let lastError: any = null;
+      for (const modelName of modelsToTry) {
+        try {
+          const response = await ai.models.generateContent({
+            ...requestParams,
+            model: modelName,
+          });
+          return response;
+        } catch (err: any) {
+          lastError = err;
+          const errMsg = err?.message || String(err);
+          console.log(`[Gemini AI Info] Model "${modelName}" status (${errMsg.slice(0, 80)}). Trying fallback model...`);
+        }
+      }
+      throw lastError;
+    },
+    {
+      timeoutMs: 8500,
+      serviceName: 'Gemini',
+      operationName: 'generateContentWithFallback',
     }
-  }
-  throw lastError;
+  );
 }
 
 export interface ParsedCommerceQuery {
@@ -59,6 +61,140 @@ export interface ParsedCommerceQuery {
   itemType?: 'product' | 'service'; // Gemini's judgment on whether the item is a product or service
   isRegistrationRequest?: boolean;
   friendlyAck?: string;
+}
+
+export type InboundIntentType =
+  | 'RESET_OR_HOME'
+  | 'GREETING'
+  | 'SMALL_TALK'
+  | 'HELP_OR_SUPPORT'
+  | 'BRAND_QUESTION'
+  | 'LOCATION_CHANGE'
+  | 'REPORT_VENDOR'
+  | 'MERCHANT_ADD_PRODUCT'
+  | 'MERCHANT_EDIT_CATALOG'
+  | 'MERCHANT_STATS'
+  | 'MERCHANT_PORTAL'
+  | 'BROWSE_MARKETS'
+  | 'BUYER_SEARCH';
+
+export interface InboundClassificationResult {
+  intent: InboundIntentType;
+  confidence: number;
+  extractedQuery?: ParsedCommerceQuery;
+  extractedLocation?: string | null;
+  rawText: string;
+}
+
+/**
+ * High-precision intent classifier combining fast regex routing and Gemini commerce parsing
+ */
+export async function classifyInboundIntent(rawInput: string): Promise<InboundClassificationResult> {
+  const text = (rawInput || '').trim();
+  const lower = text.toLowerCase().replace(/[^a-z0-9 _]+/g, '').replace(/\s+/g, ' ');
+
+  // 1. Reset / Home
+  if (/^(reset|cancel|stop|exit|start over|restart|home|menu|main menu|\/start|\/cancel|btn_home)$/i.test(lower)) {
+    return { intent: 'RESET_OR_HOME', confidence: 1.0, rawText: text };
+  }
+
+  // 2. Greeting
+  if (/^(hi|hi floate|hello|hello floate|hey|hey floate|good morning|good afternoon|good evening|start)$/i.test(lower)) {
+    return { intent: 'GREETING', confidence: 0.98, rawText: text };
+  }
+
+  // 3. Brand Questions (e.g., "what is floate about", "who made floate", "what do you do", "tell me about floate")
+  if (
+    /\b(what\s+is\s+floate|about\s+floate|who\s+made\s+floate|who\s+owns\s+floate|floate\s+about|what\s+does\s+floate\s+do|tell\s+me\s+about\s+floate|how\s+does\s+floate\s+work|what\s+is\s+this\s+bot|who\s+are\s+you)\b/i.test(
+      lower
+    ) ||
+    /^(what is floate|about floate|tell me about floate|who is floate|what does floate do|what can floate do|who created floate|who are you)$/i.test(
+      lower
+    )
+  ) {
+    return { intent: 'BRAND_QUESTION', confidence: 0.96, rawText: text };
+  }
+
+  // 4. Small Talk / Casual Conversational Check-ins
+  if (
+    /^(how are you|how are you doing|how far|how body|how are you today|how things|how is your day|how you dey|how you doing|what's up|whats up|sup|how's it going|hows it going)$/i.test(
+      lower
+    )
+  ) {
+    return { intent: 'SMALL_TALK', confidence: 0.95, rawText: text };
+  }
+
+  // 5. Help / Support
+  if (/^(help|how does this work|how it works|how do i use this|support|customer care|contact support|what can you do)$/i.test(lower)) {
+    return { intent: 'HELP_OR_SUPPORT', confidence: 0.95, rawText: text };
+  }
+
+  // 5. Location Change
+  const locChangeMatch = lower.match(/^(?:change|update|set|switch)\s+(?:my\s+)?(?:location|city)(?:\s+to\s+(.+))?$/i);
+  if (locChangeMatch || /^(my location|change location|update location|switch location)$/i.test(lower)) {
+    const inlineLoc = locChangeMatch && locChangeMatch[1] ? locChangeMatch[1].trim() : null;
+    return { intent: 'LOCATION_CHANGE', confidence: 0.95, extractedLocation: inlineLoc, rawText: text };
+  }
+
+  // 6. Report / Scam
+  if (text.startsWith('report_vendor_') || text === 'btn_report_vendor' || /^(report|report vendor|report seller|scam|fraud|fake receipt)$/i.test(lower)) {
+    return { intent: 'REPORT_VENDOR', confidence: 0.95, rawText: text };
+  }
+
+  // 7. Merchant Direct Actions
+  if (
+    text === 'btn_vendor_add_product' ||
+    /\b(add\s+(a\s+)?(new\s+)?(product|item|listing|stock)|upload\s+(a\s+)?(new\s+)?(product|item)|list\s+(a\s+)?(new\s+)?(product|item))\b/i.test(lower) ||
+    /^(add product|addproduct|add item|new product|list product|upload product|add a product|post product)$/i.test(lower)
+  ) {
+    return { intent: 'MERCHANT_ADD_PRODUCT', confidence: 0.95, rawText: text };
+  }
+
+  if (
+    text === 'btn_vendor_edit_products' ||
+    /\b(edit\s+(my\s+)?(product|products|item|items|listing|listings|prices|catalog|store)|modify\s+(my\s+)?(product|products)|update\s+(my\s+)?(product|products|prices)|manage\s+(my\s+)?(products|inventory))\b/i.test(lower) ||
+    /^(edit product|edit products|editproduct|edit listings|my inventory|inventory|manage products|edit prices|update product)$/i.test(lower)
+  ) {
+    return { intent: 'MERCHANT_EDIT_CATALOG', confidence: 0.95, rawText: text };
+  }
+
+  if (
+    text === 'btn_vendor_stats' ||
+    /\b(my\s+stats|store\s+stats|business\s+stats|how\s+many\s+searches|view\s+stats|shop\s+performance|business\s+performance|my\s+analytics)\b/i.test(lower) ||
+    /^(stats|view stats|performance|my stats|mystats|my business stats|business stats|store stats|analytics)$/i.test(lower)
+  ) {
+    return { intent: 'MERCHANT_STATS', confidence: 0.95, rawText: text };
+  }
+
+  if (
+    text === 'START_REGISTER_VENDOR' ||
+    text === 'btn_for_businesses' ||
+    text === 'btn_vendor_portal' ||
+    text === 'btn_vendor_dashboard' ||
+    /\b(register\s+(my\s+)?(business|store|shop|account|company)|i\s+want\s+to\s+(register|sell|start\s+selling|list\s+my\s+shop)|become\s+a\s+(seller|vendor|merchant)|sell\s+on\s+floate|merchant\s+registration|vendor\s+registration)\b/i.test(lower) ||
+    /^(register|register business|register my business|register shop|start selling|sell|vendor registration|merchant registration|open shop|add my shop|list my shop|vendor|business|vendor hub|merchant|my business|vendor portal|manage|merchant portal|dashboard|my store|store)$/i.test(lower)
+  ) {
+    return { intent: 'MERCHANT_PORTAL', confidence: 0.95, rawText: text };
+  }
+
+  // 8. Browse Markets
+  if (text === 'btn_browse_markets' || /^(browse markets|markets|view markets|market hub)$/i.test(lower)) {
+    return { intent: 'BROWSE_MARKETS', confidence: 0.95, rawText: text };
+  }
+
+  // 9. Default to Buyer Commerce Search
+  const parsed = await parseShoppingQuery(text);
+  if (parsed.isRegistrationRequest) {
+    return { intent: 'MERCHANT_PORTAL', confidence: 0.9, extractedQuery: parsed, rawText: text };
+  }
+
+  return {
+    intent: 'BUYER_SEARCH',
+    confidence: 0.92,
+    extractedQuery: parsed,
+    extractedLocation: parsed.targetSellerLocation,
+    rawText: text,
+  };
 }
 
 /**
@@ -277,8 +413,16 @@ Return ONLY valid JSON format like:
     }
   })();
 
-  // Guarantee maximum 5 second response time
-  const result = await withTimeout(queryTask, 5000, fallbackQueryParse(userQuery));
+  // Guarantee 8-10 second response time
+  const result = await withExternalTimeout(
+    () => queryTask,
+    {
+      timeoutMs: 8500,
+      serviceName: 'Gemini',
+      operationName: 'parseShoppingQuery',
+      fallbackValue: fallbackQueryParse(userQuery),
+    }
+  );
   queryParseCache.set(normKey, { data: result, timestamp: Date.now() });
   return result;
 }
@@ -415,7 +559,15 @@ Key guidelines:
     }
   })();
 
-  return withTimeout(replyTask, 5000, "Looking up sellers across Nigeria...");
+  return withExternalTimeout(
+    () => replyTask,
+    {
+      timeoutMs: 8500,
+      serviceName: 'Gemini',
+      operationName: 'generateNaturalWelcome',
+      fallbackValue: "Looking up sellers across Nigeria...",
+    }
+  );
 }
 
 /**
@@ -473,13 +625,9 @@ STRICT CONSTRAINT: Your proposed price MUST fall strictly between ${minFormatted
 Return ONLY the single sentence response. Example:
 "Hi! I am interested in ${productName}. Would you be open to ${maxFormatted} for a fast deal?"`;
 
-    const response = await withTimeout(
-      generateContentWithFallback(ai, {
-        contents: prompt,
-      }),
-      3500,
-      null
-    );
+    const response = await generateContentWithFallback(ai, {
+      contents: prompt,
+    }).catch(() => null);
 
     let text = response?.text?.trim() || '';
     if (!text) return codeEnforcedSuggestion;
@@ -572,11 +720,7 @@ Extract the stock listing details into a strictly valid JSON object with these k
 
 Return ONLY the plain JSON string, with no markdown formatting or commentary.`;
 
-    const response = await withTimeout(
-      generateContentWithFallback(ai, { contents: prompt }),
-      4500,
-      null
-    );
+    const response = await generateContentWithFallback(ai, { contents: prompt }).catch(() => null);
 
     const jsonText = response?.text?.trim() || '';
     if (!jsonText) return defaultResult;
@@ -670,26 +814,22 @@ Output format: Return ONLY a raw JSON object with no markdown fences, matching t
   "userGuidance": "A warm, friendly, encouraging 1-2 sentence message to the business owner explaining what to adjust if rejected"
 }`;
 
-    const response = await withTimeout(
-      generateContentWithFallback(ai, {
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                inlineData: {
-                  mimeType,
-                  data: base64Data,
-                },
+    const response = await generateContentWithFallback(ai, {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                mimeType,
+                data: base64Data,
               },
-              { text: prompt },
-            ],
-          },
-        ],
-      }),
-      9000,
-      null
-    );
+            },
+            { text: prompt },
+          ],
+        },
+      ],
+    }).catch(() => null);
 
     const responseText = response?.text?.trim() || '';
     if (!responseText) {
@@ -724,6 +864,229 @@ Output format: Return ONLY a raw JSON object with no markdown fences, matching t
       reason: 'Could not process photo format.',
       userGuidance: "Thanks for sending that! We couldn't quite see a clear photo of your face. Could you send a quick photo or selfie showing your face clearly? Takes just 2 seconds!",
     };
+  }
+}
+
+/**
+ * Detects if a user in an active Floate Secure Line relay chat wants to end/exit the session.
+ * Uses fast regex matching for standard phrases, with Gemini natural language fallback for variations.
+ */
+export async function isEndChatIntent(userInput: string): Promise<boolean> {
+  const text = (userInput || '').trim();
+  const lower = text.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').trim();
+
+  // Fast regex detection for common phrasing
+  if (
+    /^(end|end chat|endchat|close chat|stop chat|exit chat|leave chat|quit chat|end session|leave session|close session|stop session|end conversation|stop conversation|cancel chat|close|exit|leave|quit|goodbye|bye|i want to leave|disconnect|stop|cancel)$/i.test(
+      lower
+    )
+  ) {
+    return true;
+  }
+
+  // If text is short or clearly a commerce statement, don't query AI
+  if (text.length < 4 || /price|naira|how much|send|account|where|delivery|pay|item|color|size|discount/i.test(lower)) {
+    return false;
+  }
+
+  const ai = getAIClient();
+  if (!ai) return false;
+
+  try {
+    const prompt = `A user is participating in an anonymous real-time buyer-seller chat on WhatsApp.
+Determine if the user's message is an explicit request to leave, end, close, or terminate the chat session.
+
+User message: "${userInput}"
+
+Respond with strictly JSON:
+{ "isEndChat": true | false }`;
+
+    const response = await generateContentWithFallback(ai, { contents: prompt }).catch(() => null);
+    const jsonText = response?.text?.trim() || '';
+    if (!jsonText) return false;
+    const cleanJson = jsonText.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(cleanJson);
+    return Boolean(parsed.isEndChat);
+  } catch {
+    return false;
+  }
+}
+
+export interface MutualAgreementResult {
+  hasAgreed: boolean;
+  item: string;
+  agreedPrice: string;
+  terms?: string;
+  confidence: number;
+}
+
+/**
+ * Uses Gemini to analyze chat exchanges between buyer and vendor on Floate Secure Line
+ * to detect genuine mutual agreement (price, item, and terms confirmed by both sides).
+ */
+export async function detectMutualAgreement(
+  messages: Array<{ senderRole: 'BUYER' | 'VENDOR'; text: string }>,
+  defaultItemName: string = 'Item'
+): Promise<MutualAgreementResult | null> {
+  if (!messages || messages.length < 2) return null;
+
+  // Verify both buyer and vendor have contributed at least one message
+  const hasBuyer = messages.some((m) => m.senderRole === 'BUYER');
+  const hasVendor = messages.some((m) => m.senderRole === 'VENDOR');
+  if (!hasBuyer || !hasVendor) return null;
+
+  const conversationTranscript = messages
+    .slice(-10) // analyze the last 10 exchanges
+    .map((m) => `${m.senderRole}: ${m.text}`)
+    .join('\n');
+
+  const ai = getAIClient();
+  if (!ai) return null;
+
+  try {
+    const prompt = `You are the Floate Commerce Mutual Agreement Evaluator.
+Analyze this chat between a BUYER and a VENDOR regarding "${defaultItemName}".
+Determine if there is a genuine MUTUAL AGREEMENT where:
+1. Both parties agree on the exact item or specifications.
+2. Both parties have settled and agreed on a final price (in Naira / ₦).
+3. The transaction is mutually confirmed by both sides (e.g. "deal", "I agree", "send payment", "I'll take it at that price", "ok agreed", "deal done").
+
+Conversation transcript:
+${conversationTranscript}
+
+Output strictly in JSON:
+{
+  "hasAgreed": true | false,
+  "item": "Name of agreed product/service",
+  "agreedPrice": "Agreed price with Naira symbol (e.g. ₦25,000)",
+  "terms": "Summary of agreed delivery or fulfillment terms if mentioned",
+  "confidence": 0.95
+}
+Return ONLY valid JSON.`;
+
+    const response = await generateContentWithFallback(ai, { contents: prompt }).catch(() => null);
+    const jsonText = response?.text?.trim() || '';
+    if (!jsonText) return null;
+    const cleanJson = jsonText.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(cleanJson);
+
+    if (parsed.hasAgreed && (parsed.confidence ?? 0.8) >= 0.7) {
+      return {
+        hasAgreed: true,
+        item: parsed.item || defaultItemName,
+        agreedPrice: parsed.agreedPrice || 'Agreed Price',
+        terms: parsed.terms || undefined,
+        confidence: parsed.confidence || 0.9,
+      };
+    }
+    return null;
+  } catch (err) {
+    console.warn('[Gemini Agreement Evaluator Notice]:', err);
+    return null;
+  }
+}
+
+/**
+ * Checks if a user message is a conversational greeting, check-in, or brand question.
+ */
+export async function isConversationalOrBrandQuestion(userInput: string): Promise<boolean> {
+  const text = (userInput || '').trim();
+  const lower = text.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').trim();
+
+  if (
+    /^(hi|hello|hey|good morning|good afternoon|good evening|how are you|how are you doing|how far|how body|how things|how is your day|what's up|whats up|sup|how's it going|who are you|what is floate|about floate|tell me about floate|what do you do|what can you do|who made floate)$/i.test(
+      lower
+    )
+  ) {
+    return true;
+  }
+
+  // If user is searching or typing an obvious commerce item, return false
+  if (/^(i want to buy|how much is|where can i get|shoes|phone|laptop|bag|cloth|price|cost|naira|delivery|waybill)/i.test(lower)) {
+    return false;
+  }
+
+  const ai = getAIClient();
+  if (!ai) return false;
+
+  try {
+    const prompt = `Determine if the following user message to Floate (an African conversational commerce platform on WhatsApp) is a casual conversational check-in, greeting, or brand inquiry (e.g. "how are you", "what is Floate about", "who made this", "hello floate") as opposed to an explicit product search or transaction action.
+
+User message: "${userInput}"
+
+Respond with strictly JSON:
+{ "isConversationalOrBrand": true | false }`;
+
+    const response = await generateContentWithFallback(ai, { contents: prompt }).catch(() => null);
+    const jsonText = response?.text?.trim() || '';
+    if (!jsonText) return false;
+    const cleanJson = jsonText.replace(/```json/gi, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(cleanJson);
+    return Boolean(parsed.isConversationalOrBrand);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Generates an on-brand, natural, warm, varied Gemini-powered response
+ * for casual check-ins, greetings, and Floate brand questions.
+ */
+export async function generateBrandConversationalResponse(
+  userInput: string,
+  userName?: string,
+  userCity?: string
+): Promise<string> {
+  const ai = getAIClient();
+  const cleanName = userName && userName !== 'Customer' ? userName.trim() : '';
+
+  if (!ai) {
+    // Fallback warm conversational response
+    if (/how are you|how far|how you dey/i.test(userInput)) {
+      return cleanName
+        ? `Hello ${cleanName}, I'm doing great and ready to help you find verified sellers or items anywhere in Nigeria! What are you shopping for today?`
+        : `Hello, I'm doing great and ready to help you find verified sellers or items anywhere in Nigeria! What are you shopping for today?`;
+    }
+    return cleanName
+      ? `Hello ${cleanName}! Floate connects you directly with verified shops, artisans, and sellers across Nigeria with zero middleman fees and escrow protection. What would you like to find today?`
+      : `Hello! Floate connects you directly with verified shops, artisans, and sellers across Nigeria with zero middleman fees and escrow protection. What would you like to find today?`;
+  }
+
+  try {
+    const prompt = `You are Floate AI, the friendly, articulate, and reliable conversational commerce assistant for Nigeria & Africa on WhatsApp.
+
+Context:
+- User Name: ${cleanName || 'Friend'}
+- User City / Location: ${userCity || 'Nigeria'}
+- User Message: "${userInput}"
+
+Floate's Brand Identity & Capabilities:
+- Floate is a zero-commission conversational commerce network connecting buyers directly with verified sellers across major commercial hubs (Onitsha Main Market, Computer Village Ikeja, Balogun Lagos, Alaba, Trade Fair, Wuse Abuja, etc.).
+- Offers anonymous Floate Secure Line chats and Floate SafePay (escrow via Flutterwave) for safe trading.
+- Allows merchants to list products, manage inventory, and receive direct buyer leads.
+
+Instructions:
+1. Respond warmly, naturally, and conversationally in 2 to 3 concise sentences.
+2. Maintain an authentic Nigerian warmth (refined English with natural warmth, polite, friendly, never robotic or canned).
+3. If they asked how you are doing, answer warmly first, then invite them to discover items or sellers.
+4. If they asked what Floate is or does, explain Floate's purpose cleanly and invite them to search or list their shop.
+5. Do NOT use decorative emojis (no stars, rocket emojis, or excessive icons). Use WhatsApp single asterisks (*bold*) for emphasis if needed.
+
+Generate the exact message to send to the user:`;
+
+    const response = await generateContentWithFallback(ai, {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    }).catch(() => null);
+
+    const generated = response?.text?.trim();
+    if (generated && generated.length > 10) {
+      return generated;
+    }
+
+    return `Hello${cleanName ? ' ' + cleanName : ''}! I'm doing well, thank you. Floate connects you directly to verified sellers across Nigerian markets with secure payments. What would you like to shop for today?`;
+  } catch (err) {
+    console.warn('[Gemini Brand Conversational AI Notice]:', err);
+    return `Hello${cleanName ? ' ' + cleanName : ''}! I'm doing very well, thank you. How can I help you with your shopping or business today?`;
   }
 }
 

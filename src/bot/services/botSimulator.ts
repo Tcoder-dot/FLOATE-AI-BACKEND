@@ -1,22 +1,106 @@
 import { getBotInstance } from '../bot.js';
+import {
+  processMasterWhatsAppEngine,
+  addWhatsAppOutgoingListener,
+  removeWhatsAppOutgoingListener,
+  SendWhatsAppOptions,
+} from './whatsappService.js';
 
 export interface SimulatedReply {
-  chatId: number;
+  chatId: number | string;
   text: string;
   parseMode?: string;
   replyMarkup?: any;
+  quickReplies?: Array<{ id: string; title: string }>;
+  listMenu?: {
+    buttonText: string;
+    title?: string;
+    sections: Array<{
+      title: string;
+      rows: Array<{ id: string; title: string; description?: string }>;
+    }>;
+  };
+  ctaUrl?: { displayText: string; url: string; headerText?: string; footerText?: string };
 }
 
 let isTransformerAttached = false;
-const globalRepliesMap = new Map<number, SimulatedReply[]>();
+const globalRepliesMap = new Map<number | string, SimulatedReply[]>();
 
 export async function processSimulatedMessage(
   userText: string,
-  userId: number = 99912345,
-  firstName: string = 'Tester'
+  userId: number | string = '2348012345678',
+  firstName: string = 'Customer',
+  channel: 'whatsapp' | 'telegram' = 'whatsapp'
 ): Promise<{ replies: SimulatedReply[]; logs: string[] }> {
-  const bot = getBotInstance();
   const logs: string[] = [];
+  const cleanId = String(userId).trim();
+
+  // -------------------------------------------------------------
+  // 1. PRIMARY CHANNEL: WhatsApp Conversational Engine Simulator
+  // -------------------------------------------------------------
+  if (channel === 'whatsapp' || typeof userId === 'string') {
+    const phone = cleanId.replace(/\D/g, '') || '2348012345678';
+    const capturedReplies: SimulatedReply[] = [];
+
+    // Attach temporary listener to capture all outgoing messages during this turn
+    const listener = (toPhone: string, text: string, options?: SendWhatsAppOptions) => {
+      const cleanTo = toPhone.replace(/\D/g, '');
+      const cleanSender = phone.replace(/^0/, '234');
+      const isDirectRecipient = cleanTo === cleanSender || cleanTo === phone;
+
+      if (isDirectRecipient) {
+        capturedReplies.push({
+          chatId: toPhone,
+          text,
+          quickReplies: options?.quickReplies,
+          listMenu: options?.listMenu,
+          ctaUrl: options?.ctaUrl,
+          replyMarkup: options?.quickReplies
+            ? {
+                inline_keyboard: options.quickReplies.map((q) => [
+                  { text: q.title, callback_data: q.id },
+                ]),
+              }
+            : undefined,
+        });
+      } else {
+        // Relay delivery to counterpart (e.g. vendor or buyer)
+        logs.push(`[Secure Line Relayed ➡️ +${toPhone}]: "${text}"`);
+        capturedReplies.push({
+          chatId: toPhone,
+          text: `[Relayed to Vendor (+${toPhone})]:\n${text}`,
+          quickReplies: options?.quickReplies,
+          listMenu: options?.listMenu,
+          ctaUrl: options?.ctaUrl,
+        });
+      }
+    };
+
+    addWhatsAppOutgoingListener(listener);
+    logs.push(`[WhatsApp Simulator Ingress] From +${phone} (${firstName}): "${userText}"`);
+
+    try {
+      await processMasterWhatsAppEngine({
+        senderPhone: phone,
+        senderName: firstName,
+        text: userText,
+      });
+      logs.push(`[WhatsApp Simulator Executed] Captured ${capturedReplies.length} replies.`);
+    } catch (err: any) {
+      logs.push(`[WhatsApp Simulator Error] ${err?.message || err}`);
+      console.error('[Simulator WhatsApp Error]:', err);
+    } finally {
+      removeWhatsAppOutgoingListener(listener);
+    }
+
+    return { replies: capturedReplies, logs };
+  }
+
+  // -------------------------------------------------------------
+  // 2. SECONDARY CHANNEL: Telegram Engine Simulator
+  // -------------------------------------------------------------
+  const bot = getBotInstance();
+  const numericId = Number(userId) || 99912345;
 
   if (!bot.botInfo) {
     bot.botInfo = {
@@ -70,13 +154,21 @@ export async function processSimulatedMessage(
   }
 
   // Clear previous replies for this user ID
-  globalRepliesMap.set(userId, []);
+  globalRepliesMap.set(numericId, []);
 
   try {
-    const isCallback = userText.startsWith('cmd_') || userText.startsWith('role_') || userText.startsWith('toggle_') || userText.startsWith('reg_') || userText.startsWith('btn_') || userText.startsWith('edit_') || userText.startsWith('inv_');
-    const isVoice = !isCallback && (userText.toLowerCase().includes('voice note') || userText.startsWith('🎙️'));
+    const isCallback =
+      userText.startsWith('cmd_') ||
+      userText.startsWith('role_') ||
+      userText.startsWith('toggle_') ||
+      userText.startsWith('reg_') ||
+      userText.startsWith('btn_') ||
+      userText.startsWith('edit_') ||
+      userText.startsWith('inv_');
+    const isVoice =
+      !isCallback &&
+      (userText.toLowerCase().includes('voice note') || userText.startsWith('🎙️'));
 
-    // Construct standard Telegram Update structure
     let update: any;
 
     if (isCallback) {
@@ -85,14 +177,14 @@ export async function processSimulatedMessage(
         callback_query: {
           id: String(Math.floor(Math.random() * 100000)),
           from: {
-            id: userId,
+            id: numericId,
             is_bot: false,
             first_name: firstName,
             username: 'test_user',
           },
           message: {
             message_id: Math.floor(Math.random() * 10000),
-            chat: { id: userId, first_name: firstName, type: 'private' },
+            chat: { id: numericId, first_name: firstName, type: 'private' },
             date: Math.floor(Date.now() / 1000),
             text: 'Menu',
           },
@@ -105,13 +197,13 @@ export async function processSimulatedMessage(
         message: {
           message_id: Math.floor(Math.random() * 10000),
           from: {
-            id: userId,
+            id: numericId,
             is_bot: false,
             first_name: firstName,
             username: 'test_user',
           },
           chat: {
-            id: userId,
+            id: numericId,
             first_name: firstName,
             type: 'private',
           },
@@ -129,13 +221,13 @@ export async function processSimulatedMessage(
         message: {
           message_id: Math.floor(Math.random() * 10000),
           from: {
-            id: userId,
+            id: numericId,
             is_bot: false,
             first_name: firstName,
             username: 'test_user',
           },
           chat: {
-            id: userId,
+            id: numericId,
             first_name: firstName,
             type: 'private',
           },
@@ -145,12 +237,12 @@ export async function processSimulatedMessage(
       };
     }
 
-    logs.push(`[Incoming Update] ${userText}`);
+    logs.push(`[Telegram Update] ${userText}`);
     await bot.handleUpdate(update);
   } catch (err: any) {
     logs.push(`[Error] ${err?.message || err}`);
   }
 
-  const capturedReplies = globalRepliesMap.get(userId) || [];
+  const capturedReplies = globalRepliesMap.get(numericId) || [];
   return { replies: capturedReplies, logs };
 }
