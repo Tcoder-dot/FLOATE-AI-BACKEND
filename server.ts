@@ -13,19 +13,7 @@ import { executeSearch } from './src/bot/services/searchService.js';
 import { handleWhatsAppVerification, handleWhatsAppWebhook, sendWhatsAppMessage } from './src/bot/services/whatsappService.js';
 
 
-const getFilename = () => {
-  if (typeof __filename !== 'undefined') return __filename;
-  if (import.meta && import.meta.url) {
-    try {
-      return fileURLToPath(import.meta.url);
-    } catch {
-      return '';
-    }
-  }
-  return '';
-};
-
-const currentFilename = getFilename();
+const currentFilename = typeof __filename !== 'undefined' ? __filename : '';
 const currentDirname = typeof __dirname !== 'undefined' ? __dirname : (currentFilename ? path.dirname(currentFilename) : process.cwd());
 
 async function startServer() {
